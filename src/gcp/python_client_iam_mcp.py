@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
-"""
-Example Python client for Companies House MCP Server with IAM authentication.
+"""Example Python client for Companies House MCP Server with IAM authentication.
 
 Install dependencies:
     pip install google-auth google-auth-oauthlib google-auth-httplib2 requests
@@ -11,17 +10,17 @@ Usage with Service Account Key File:
     python python_client_iam_mcp.py
 """
 
-import os
 import json
+import os
 import sys
-from typing import Dict, Any, Optional
+from typing import Any, Dict
 
 try:
     import google.auth
-    from google.auth.transport.requests import Request
-    from google.auth import exceptions as google_auth_exceptions
-    from google.oauth2 import service_account
     import requests
+    from google.auth import exceptions as google_auth_exceptions
+    from google.auth.transport.requests import Request
+    from google.oauth2 import service_account
 except ImportError:
     print("Error: Required packages not installed.")
     print("Install with: pip install google-auth google-auth-oauthlib google-auth-httplib2 requests")
@@ -154,7 +153,7 @@ class IAMAuthenticatedMCPClient:
                 # Some other error - re-raise it
                 raise
     
-    def _make_request(self, method: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    def _make_request(self, method: str, params: Dict[str, Any] | None = None) -> Dict[str, Any]:
         """Make an authenticated JSON-RPC request."""
         token = self._get_identity_token()
         
@@ -232,13 +231,13 @@ class IAMAuthenticatedMCPClient:
                 service_account_email = ""
                 if creds_path and os.path.isfile(creds_path):
                     try:
-                        with open(creds_path, 'r') as f:
+                        with open(creds_path) as f:
                             creds_json = json.load(f)
                             service_account_email = creds_json.get("client_email", "")
                     except:
                         pass
                 
-                error_msg = f"401 Unauthorized: The service account does not have permission to access the Cloud Run service.\n\n"
+                error_msg = "401 Unauthorized: The service account does not have permission to access the Cloud Run service.\n\n"
                 if error_detail:
                     error_msg += f"Error details: {error_detail}\n\n"
                 if service_account_email:

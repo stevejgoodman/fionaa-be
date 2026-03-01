@@ -1,6 +1,5 @@
 #!/usr/bin/env python
-"""
-Setup script for Gmail API integration.
+"""Setup script for Gmail API integration.
 
 This script handles the OAuth flow for Gmail API access by:
 1. Creating a .secrets directory if it doesn't exist
@@ -9,9 +8,9 @@ This script handles the OAuth flow for Gmail API access by:
 4. Storing the access token in .secrets/token.json
 """
 
+import json
 import os
 import sys
-import json
 from pathlib import Path
 
 # Add project root to sys.path for imports to work correctly
@@ -19,12 +18,13 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../.
 
 # Import required Google libraries
 from google_auth_oauthlib.flow import InstalledAppFlow
-from google.oauth2.credentials import Credentials
+
 
 def main():
     """Run Gmail authentication setup."""
-    # Create .secrets directory
-    secrets_dir = Path(__file__).parent.absolute() / ".secrets"
+    # Use project root .secrets (same path the Gmail ingest notebook uses)
+    project_root = Path(__file__).resolve().parent.parent.parent
+    secrets_dir = project_root / ".secrets"
     secrets_dir.mkdir(parents=True, exist_ok=True)
     
     # Check for secrets.json
@@ -47,7 +47,7 @@ def main():
         ]
         
         # Load client secrets
-        with open(secrets_path, 'r') as f:
+        with open(secrets_path) as f:
             client_config = json.load(f)
         
         # Create the flow using the client_secrets.json format

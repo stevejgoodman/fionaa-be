@@ -1,0 +1,15 @@
+{
+    "dockerfile_lines": [],
+    "graphs": {
+      "fionaa": "./src/graph.py:fionaa",
+      "chatbot": "./src/chatbot_graph.py:chatbot"
+    },
+    "python_version": "3.12",
+    "env": ".env",
+    "dependencies": [
+      "."
+    ],
+    "env_vars": {
+      "LANGSMITH_TRACING": "false"
+    }
+  }
