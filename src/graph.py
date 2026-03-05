@@ -34,7 +34,7 @@ from langchain_core.runnables import RunnableConfig
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import MessagesState
-from langgraph.store.postgres import AsyncPostgresStore
+#from langgraph.store.postgres import AsyncPostgresStore
 
 from config import OCR_OUTPUT_DIR, WORKSPACE
 from ocr_extraction import DocumentAI
@@ -103,11 +103,14 @@ def _make_backend(runtime):
         default=StateBackend(runtime),
         routes={
             "/memories/": StoreBackend(runtime, namespace=_memory_namespace),
-            "/disk-files/": FilesystemBackend(
-                root_dir=str(WORKSPACE), virtual_mode=True
-            ),
+            # "/disk-files/": FilesystemBackend(
+            #     root_dir=str(WORKSPACE), virtual_mode=True
+            "/disk-files": StoreBackend(runtime, namespace="disk-files")
+
         },
     )
+
+
 
 
 # ---------------------------------------------------------------------------
@@ -265,15 +268,15 @@ async def build_graph(
     # Internal persistence for the deep agent (not exposed to the outer graph).
     # We keep a reference to the context manager on the store itself so it is
     # not garbage-collected (which would close the underlying DB connection).
-    _pg_conn = (
-        f"postgresql://postgres:{os.environ['PG_PASSWORD']}"
-        f"@localhost/langchain"
-    )
-    _store_ctx = AsyncPostgresStore.from_conn_string(_pg_conn)
-    _store = await _store_ctx.__aenter__()
-    await _store.setup()
-    _store._ctx = _store_ctx  # prevent GC of the context manager
-    _checkpointer = MemorySaver()
+    # _pg_conn = (
+    #     f"postgresql://postgres:{os.environ['PG_PASSWORD']}"
+    #     f"@localhost/langchain"
+    # )
+    # _store_ctx = AsyncPostgresStore.from_conn_string(_pg_conn)
+    # _store = await _store_ctx.__aenter__()
+    # await _store.setup()
+    # _store._ctx = _store_ctx  # prevent GC of the context manager
+    # _checkpointer = MemorySaver()
 
     # Initialise MCP tool servers (async)
     logger.info("[build_graph] Connecting to LinkedIn MCP server…")
@@ -299,9 +302,9 @@ async def build_graph(
     _assessment_agent = create_deep_agent(
         model=init_chat_model("anthropic:claude-sonnet-4-20250514"),
         tools=orchestrator_tools,
-        store=_store,
+        # store=_store,
         backend=_make_backend,
-        checkpointer=_checkpointer,
+        # checkpointer=_checkpointer,
         subagents=subagents,
         system_prompt=RESEARCH_PROMPT,
     )
@@ -322,7 +325,9 @@ async def build_graph(
 
     # Pass the store and checkpointer so direct invocation (e.g. ingest.py) works.
     # langgraph dev will use its own managed persistence when deployed via the server.
-    graph = builder.compile(checkpointer=_checkpointer, store=_store)
+    #graph = builder.compile(checkpointer=_checkpointer, store=_store)
+    graph = builder.compile()
+
     logger.info("[build_graph] Ready")
     return graph
 

@@ -36,7 +36,7 @@ from langgraph.prebuilt import ToolNode, tools_condition
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
-from vector_store import get_store
+#from vector_store import get_store
 
 load_dotenv()
 
