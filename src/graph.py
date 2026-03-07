@@ -23,20 +23,21 @@ from typing import List
 from deepagents import create_deep_agent
 from deepagents.backends import (
     CompositeBackend,
-    FilesystemBackend,
     StateBackend,
-    StoreBackend,
 )
+
+from backends.gcs_backend import GCSBackend
 from dotenv import load_dotenv
 from langchain.chat_models import init_chat_model
 from langchain_core.messages import HumanMessage
 from langchain_core.runnables import RunnableConfig
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, START, StateGraph
+from langgraph.store.memory import InMemoryStore
 from langgraph.graph.message import MessagesState
 #from langgraph.store.postgres import AsyncPostgresStore
 
-from config import OCR_OUTPUT_DIR, WORKSPACE
+from config import DATA_DIR, GCS_LOAN_APPLICATION_PREFIX
 from ocr_extraction import DocumentAI
 from prompts.agent_prompts import RESEARCH_PROMPT
 from subagents import make_subagents
@@ -86,27 +87,18 @@ def _make_backend(runtime):
     """Create a :class:`CompositeBackend` for the deep agent.
 
     Path routing:
-        * ``/memories/``   → persistent :class:`StoreBackend` (survives turns)
-                             namespace: ``("memory", <case_number>)``
-        * ``/disk-files/`` → :class:`FilesystemBackend` rooted at WORKSPACE
+        * ``/reports/``    → :class:`GCSBackend` at ``<case_number>/reports/`` in GCS
+        * ``/disk-files/`` → :class:`GCSBackend` at bucket root
         * everything else  → ephemeral :class:`StateBackend`
     """
-    def _memory_namespace(ctx) -> tuple[str, ...]:
-        # ctx.state is the deep-agent's own internal state and does not carry
-        # the outer graph's case_number.  Read from RunnableConfig instead —
-        # it is propagated intact through the entire invocation chain.
-        config = getattr(ctx.runtime, "config", None) or {}
-        case_number = config.get("configurable", {}).get("case_number") or "unknown"
-        return ("memory", case_number)
+    config = getattr(runtime, "config", None) or {}
+    case_number = config.get("configurable", {}).get("case_number") or "unknown"
 
     return CompositeBackend(
         default=StateBackend(runtime),
         routes={
-            "/memories/": StoreBackend(runtime, namespace=_memory_namespace),
-            # "/disk-files/": FilesystemBackend(
-            #     root_dir=str(WORKSPACE), virtual_mode=True
-            "/disk-files": StoreBackend(runtime, namespace="disk-files")
-
+            "/reports/": GCSBackend(prefix=f"{case_number}/reports"),
+            "/disk-files/": GCSBackend(),
         },
     )
 
@@ -120,15 +112,15 @@ def _make_backend(runtime):
 def startup_node(state: State) -> dict:
     """Parse, classify, extract, and persist all documents for the case.
 
-    Reads source documents from ``<PROJECT_ROOT>/data/<case_number>/``,
-    runs the Landing AI ADE pipeline on each file, and writes structured
-    JSON extractions plus annotated PNGs to the shared workspace under
-    ``ocr_output/<case_number>/``.
+    Reads source documents from ``data/<case_number>/`` on the local filesystem
+    (landing zone), uploads them to GCS under
+    ``<case_number>/loan_application/``, runs the Landing AI ADE pipeline on
+    each file, and uploads structured JSON extractions plus annotated PNGs to
+    GCS under ``<case_number>/ocr_output/``.
 
     When ``email_input`` is present in state, ``case_number`` is derived from
     the sender address (``email_input["from"]``) and the email body is injected
-    as the first :class:`~langchain_core.messages.HumanMessage` so the
-    assessment agent receives the full application text.
+    as the first :class:`~langchain_core.messages.HumanMessage`.
 
     Args:
         state: Current graph state.  Either ``case_number`` or ``email_input``
@@ -138,14 +130,15 @@ def startup_node(state: State) -> dict:
         Partial state update with ``case_number``, ``documents``, and an
         initial ``messages`` entry when ``email_input`` is provided.
     """
+    from google.cloud import storage as gcs_storage
+
     email_input = state.get("email_input") or {}
-    # Prefer filesystem-safe case_number from ingest (matches data/<case_number>/); fall back to "from" or state
     case_number = (
         email_input.get("case_number")
         or email_input.get("from")
         or state.get("case_number", "unknown")
     )
-    data_dir = WORKSPACE.parent.parent / "data" / case_number
+    data_dir = DATA_DIR / case_number
 
     logger.info("━━━ [startup] case=%s", case_number)
 
@@ -159,6 +152,15 @@ def startup_node(state: State) -> dict:
 
     source_files = [p for p in data_dir.iterdir() if p.is_file()]
     logger.info("[startup] Found %d source file(s) in %s", len(source_files), data_dir)
+
+    # Upload source documents to GCS under <case_number>/loan_application/
+    bucket_name = os.environ["BUCKET_NAME"]
+    gcs = gcs_storage.Client(project=os.environ.get("GOOGLE_CLOUD_PROJECT"))
+    bucket = gcs.bucket(bucket_name)
+    for document_path in source_files:
+        loan_app_key = f"{case_number}/{GCS_LOAN_APPLICATION_PREFIX}/{document_path.name}"
+        bucket.blob(loan_app_key).upload_from_filename(str(document_path))
+        logger.info("[startup] Uploaded source doc to GCS: %s", loan_app_key)
 
     documents = []
     for i, document_path in enumerate(source_files, start=1):
@@ -185,33 +187,20 @@ def startup_node(state: State) -> dict:
         )
         doc.extract()
 
-        # Persist to workspace/ocr_output/ so agents can read via /disk-files/
-        doc.persist(output_root=OCR_OUTPUT_DIR)
+        # Upload OCR output to GCS; returns the agent virtual path of the JSON
+        ocr_virtual_path = doc.persist()
+        logger.info(
+            "[startup] (%d/%d) OCR output at %s",
+            i, len(source_files), ocr_virtual_path,
+        )
 
-        # Embed parsed chunks and store in PGVectorStore for RAG retrieval
-        asyncio.run(doc.embed_and_store())
-
-        # Store only serializable metadata — the full extraction JSON is on disk
-        ocr_path = OCR_OUTPUT_DIR / case_number / f"{document_path.stem}_extraction.json"
         documents.append(
             {
                 "document_name": document_path.name,
                 "document_type": doc.document_type,
-                "ocr_output_path": str(ocr_path),
+                "ocr_output_path": ocr_virtual_path,
             }
         )
-
-        # documents.append(
-        #     {
-        #         "document_name": "5573DraftAccounts_extraction.json",
-        #         "document_type": "annual_company_report",
-        #         "ocr_output_path": "/Users/stevegoodman/dev/fionaa-be/data/workspace/ocr_output/stevejgoodman@gmail.com/5573DraftAccounts_extraction.json",
-        #     }
-        
-        # logger.info(
-        #     "[startup] (%d/%d) Done — extraction saved to %s",
-        #     i, len(source_files), ocr_path,
-        # )
 
     type_summary = ", ".join(d["document_type"] for d in documents) or "none"
     logger.info(
@@ -221,8 +210,6 @@ def startup_node(state: State) -> dict:
 
     update: dict = {"case_number": case_number, "documents": documents}
 
-    # Seed the conversation with the application text from the email body so
-    # the assessment agent receives it as the first human message.
     application_text = email_input.get("body", "")
     if application_text:
         update["messages"] = [HumanMessage(content=application_text)]
@@ -265,18 +252,8 @@ async def build_graph(
     """
     logger.info("━━━ [build_graph] Initialising Fionaa assessment graph")
 
-    # Internal persistence for the deep agent (not exposed to the outer graph).
-    # We keep a reference to the context manager on the store itself so it is
-    # not garbage-collected (which would close the underlying DB connection).
-    # _pg_conn = (
-    #     f"postgresql://postgres:{os.environ['PG_PASSWORD']}"
-    #     f"@localhost/langchain"
-    # )
-    # _store_ctx = AsyncPostgresStore.from_conn_string(_pg_conn)
-    # _store = await _store_ctx.__aenter__()
-    # await _store.setup()
-    # _store._ctx = _store_ctx  # prevent GC of the context manager
-    # _checkpointer = MemorySaver()
+    _store = InMemoryStore()
+    _checkpointer = MemorySaver()
 
     # Initialise MCP tool servers (async)
     logger.info("[build_graph] Connecting to LinkedIn MCP server…")
@@ -323,10 +300,7 @@ async def build_graph(
     builder.add_edge("startup", "assessment_deepagent")
     builder.add_edge("assessment_deepagent", END)
 
-    # Pass the store and checkpointer so direct invocation (e.g. ingest.py) works.
-    # langgraph dev will use its own managed persistence when deployed via the server.
-    #graph = builder.compile(checkpointer=_checkpointer, store=_store)
-    graph = builder.compile()
+    graph = builder.compile(checkpointer=_checkpointer, store=_store)
 
     logger.info("[build_graph] Ready")
     return graph
@@ -340,3 +314,4 @@ try:
     fionaa = None  # async context — caller must use `await build_graph()`
 except RuntimeError:
     fionaa = asyncio.run(build_graph())  # no loop running — safe for langgraph dev
+

@@ -20,7 +20,7 @@ from dotenv import load_dotenv
 from langchain_core.messages import HumanMessage
 
 from graph import build_graph
-from tests.application_forms import steve_application_str, synthesia_application_str
+from application_forms import steve_application_str, synthesia_application_str
 
 load_dotenv()
 
@@ -130,9 +130,9 @@ async def _main() -> None:
     report = await run_assessment(
         case_number='Synthesia',  # args.case,
         application_text=synthesia_application_str,
-        thread_id=args.thread,
-        run_without_ocr=False,
-        run_without_internet_search=False,
+        thread_id='Synthesia', #args.thread,
+        run_without_ocr=True,
+        run_without_internet_search=True,
         graph=graph,
     )
 

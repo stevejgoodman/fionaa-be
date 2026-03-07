@@ -26,13 +26,13 @@ Assess whether the loan application meets the eligibility criteria for the reque
 ## STEP 1 — Catalogue all available documents
 Before doing any analysis, list every file you find in:
   - /disk-files/<case_number>/ocr_output/  (derive the case number from the application)
-  - /loan_policy_documents/
+  - /disk-files/loan_policy_documents/
 
-Write this file list to /memories/eligibility_file_log.md.
+Write this file list to /reports/eligibility_file_log.md.
 You MUST revisit this list in the final step to confirm nothing was missed.
 
 ## STEP 2 — Read the loan policy
-Read the relevant policy document from /loan_policy_documents/ for the loan type stated in the application.
+Read the relevant policy document from /disk-files/loan_policy_documents/ for the loan type stated in the application.
 Extract and list every eligibility requirement explicitly.
 
 ## STEP 3 — Determine required documents
@@ -54,15 +54,15 @@ For every file identified in Step 1 under ocr_output/:
      Flag any discrepancy as a **RED FLAG**.
 
 ## STEP 5 — Final verification (circle back)
-Open /memories/eligibility_file_log.md and go through every file listed.
+Open /reports/eligibility_file_log.md and go through every file listed.
 Confirm each one was assessed in Step 4.
 **Do NOT write your conclusions until every file is accounted for.**
 
 ## STEP 6 — Save and report
 Save key application details (applicant name, loan type, amount, directors, etc.) as
-key-value pairs to /memories/application_details.md.
+key-value pairs to /reports/application_details.md.
 
-Write a concise eligibility summary to /memories/eligibility_findings.md covering:
+Write a concise eligibility summary to /reports/eligibility_findings.md covering:
   - Which criteria are met / not met
   - Document adequacy (dates, completeness)
   - Any red flags or missing documents
@@ -85,12 +85,12 @@ Perform a detailed financial assessment of the loan application based on the sub
 ---
 
 ## STEP 1 — Load application context
-Read /memories/application_details.md to retrieve the case number, loan type, applicant details,
+Read /reports/application_details.md to retrieve the case number, loan type, applicant details,
 and expected documents. If this file does not exist, extract the details from the application text provided.
 
 ## STEP 2 — Catalogue all documents
 List every file in /disk-files/<case_number>/ocr_output/.
-Write this list to /memories/financial_assessment_file_log.md.
+Write this list to /reports/financial_assessment_file_log.md.
 You MUST return to this list in the final step.
 
 ## STEP 3 — Assess each document
@@ -102,16 +102,16 @@ For every file in your Step 2 list:
   e. Identify any unusual transactions, gaps, or signs of financial stress.
 
 ## STEP 4 — Check eligibility criteria
-Using the eligibility criteria from /memories/eligibility_findings.md (or re-reading
-/loan_policy_documents/ if needed), confirm each document satisfies the required criteria.
+Using the eligibility criteria from /reports/eligibility_findings.md (or re-reading
+/disk-files/loan_policy_documents/ if needed), confirm each document satisfies the required criteria.
 
 ## STEP 5 — Final verification (circle back)
-Open /memories/financial_assessment_file_log.md and go through every file listed.
+Open /reports/financial_assessment_file_log.md and go through every file listed.
 Confirm each was assessed in Step 3.
 **Do NOT write your final conclusion until every document is accounted for.**
 
 ## STEP 6 — Write the assessment report
-Write a concise report to /memories/financial_assessment_findings.md covering:
+Write a concise report to /reports/financial_assessment_findings.md covering:
   - Key financial health indicators extracted from the documents
   - Consistency between documents and the application form
   - Outstanding concerns or red flags
@@ -167,7 +167,7 @@ Review all findings before concluding. Confirm every consistency check in Step 3
 completed and every flag category in Step 4 has been explicitly checked.
 
 ## STEP 6 — Save findings
-Write all findings to /memories/companies_house_findings.md.
+Write all findings to /reports/companies_house_findings.md.
 Include all URLs and reference links used.
 
 **Report facts only. Do not offer opinions or recommendations.**
@@ -216,7 +216,7 @@ Review the user details again. Confirm that every named director, founder, or ke
 has been searched. 
 
 ## STEP 5 — Save findings
-Write all findings to /memories/linkedin_findings.md.
+Write all findings to /reports/linkedin_findings.md.
 Include links to all profiles and pages cited.
 
 **Report facts only. Do not offer opinions.**
@@ -260,7 +260,7 @@ Review the user details once more. Confirm you have:
 - Searched for news about the key individuals named in the application.
 
 ## STEP 5 — Save findings
-Write all findings to /memories/internet_findings.md.
+Write all findings to /reports/internet_findings.md.
 Include all URLs and source citations.
 
 Keep responses concise and factual. Do not offer opinions.
@@ -289,11 +289,11 @@ Only draw on information from tools and documents — do not fabricate data.
 ---
 
 ## STEP 1 — Initialise task checklist
-Before taking any other action, write a checklist to /memories/progress.md listing every step
+Before taking any other action, write a checklist to /reports/progress.md listing every step
 below as TODO. Update the status of each item as you complete it.
 
 ## STEP 2 — Read and record the application
-Extract and save the following to /memories/application_details.md:
+Extract and save the following to /reports/application_details.md:
 - Applicant name and contact details
 - Company name, type (registered limited company / sole trader / partnership), and registration number (if known)
 - Loan type and amount requested
@@ -301,8 +301,8 @@ Extract and save the following to /memories/application_details.md:
 - Financial figures and claims stated on the form
 
 ## STEP 3 — Delegate to specialist sub-agents
-Invoke the following sub-agents. Each agent saves its output to /memories/.
-Update /memories/progress.md as each completes.
+Invoke the following sub-agents. Each agent saves its output to /reports/.
+Update /reports/progress.md as each completes.
 
   a. **eligibility-assessment-agent** — checks loan eligibility and assesses submitted financial
      documents against policy criteria.
@@ -314,14 +314,14 @@ Update /memories/progress.md as each completes.
   e. **internet-search-agent** — searches the web for the company website and any news coverage.
 
 ## STEP 4 — Review ALL sub-agent findings (circle back)
-Before writing the final report, read every file saved to /memories/:
-  - /memories/application_details.md
-  - /memories/eligibility_findings.md
-  - /memories/financial_assessment_findings.md
-  - /memories/companies_house_findings.md  (if applicable)
-  - /memories/linkedin_findings.md
-  - /memories/internet_findings.md
-  - /memories/progress.md
+Before writing the final report, read every file saved to /reports/:
+  - /reports/application_details.md
+  - /reports/eligibility_findings.md
+  - /reports/financial_assessment_findings.md
+  - /reports/companies_house_findings.md  (if applicable)
+  - /reports/linkedin_findings.md
+  - /reports/internet_findings.md
+  - /reports/progress.md
   - Any other files written during this session
 
 Confirm all sub-agents have completed. If any are still marked TODO in progress.md, run them now.
@@ -334,7 +334,7 @@ Identify any inconsistencies across data sources:
 - Are there any concerns raised by the news search or online presence review?
 
 ## STEP 6 — Write the final report
-Save a structured markdown report to /memories/report.md with the following sections:
+Save a structured markdown report to /reports/report.md with the following sections:
 
 ### 1. Summary
 Brief overview of the applicant, company, and loan request.
