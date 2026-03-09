@@ -13,6 +13,37 @@ from google.cloud.exceptions import NotFound
 from google.oauth2 import service_account
 
 
+def setup_google_credentials() -> None:
+    """Ensure ``GOOGLE_APPLICATION_CREDENTIALS`` is set for IAM and GCS auth.
+
+    If ``GOOGLE_APPLICATION_CREDENTIALS`` is already set (and the file exists)
+    this is a no-op.  Otherwise, if ``GOOGLE_CREDENTIALS_JSON`` is set, the
+    service account JSON is written to a temporary file (kept for the process
+    lifetime) and ``GOOGLE_APPLICATION_CREDENTIALS`` is pointed at it.
+
+    Call this once at process start — before any Google API clients are
+    constructed — so that libraries that read ``GOOGLE_APPLICATION_CREDENTIALS``
+    (e.g. ``google.oauth2.id_token.fetch_id_token``) find valid credentials.
+    """
+    import tempfile
+
+    existing = os.getenv("GOOGLE_APPLICATION_CREDENTIALS", "").strip()
+    if existing and os.path.isfile(existing):
+        return  # already configured
+
+    creds_json = os.environ.get("GOOGLE_CREDENTIALS_JSON", "").strip()
+    if not creds_json:
+        return
+
+    with tempfile.NamedTemporaryFile(
+        mode="w", suffix=".json", delete=False, prefix="gcp_sa_"
+    ) as f:
+        f.write(creds_json)
+        tmp_path = f.name
+
+    os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = tmp_path
+
+
 def make_gcs_client(project: str | None = None) -> storage.Client:
     """Create a :class:`~google.cloud.storage.Client` using available credentials.
 

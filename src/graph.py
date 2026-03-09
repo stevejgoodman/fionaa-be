@@ -26,7 +26,7 @@ from deepagents.backends import (
     StateBackend,
 )
 
-from backends.gcs_backend import GCSBackend, make_gcs_client
+from backends.gcs_backend import GCSBackend, make_gcs_client, setup_google_credentials
 from dotenv import load_dotenv
 from langchain.chat_models import init_chat_model
 from langchain_core.messages import HumanMessage
@@ -252,6 +252,11 @@ async def build_graph(
         Compiled :class:`~langgraph.graph.StateGraph` ready for ``langgraph dev``.
     """
     logger.info("━━━ [build_graph] Initialising Fionaa assessment graph")
+
+    # Ensure GOOGLE_APPLICATION_CREDENTIALS is set before any IAM/GCS clients
+    # are constructed.  In cloud deployments the service account JSON is passed
+    # via GOOGLE_CREDENTIALS_JSON and written to a temp file here.
+    setup_google_credentials()
 
     _store = InMemoryStore()
     _checkpointer = MemorySaver()
