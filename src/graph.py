@@ -26,7 +26,7 @@ from deepagents.backends import (
     StateBackend,
 )
 
-from backends.gcs_backend import GCSBackend
+from backends.gcs_backend import GCSBackend, make_gcs_client
 from dotenv import load_dotenv
 from langchain.chat_models import init_chat_model
 from langchain_core.messages import HumanMessage
@@ -132,8 +132,6 @@ def startup_node(state: State, *, store: BaseStore) -> dict:
         Partial state update with ``case_number``, ``documents``, and an
         initial ``messages`` entry when ``email_input`` is provided.
     """
-    from google.cloud import storage as gcs_storage
-
     email_input = state.get("email_input") or {}
     case_number = (
         email_input.get("case_number")
@@ -157,7 +155,7 @@ def startup_node(state: State, *, store: BaseStore) -> dict:
 
     # Upload source documents to GCS under <case_number>/loan_application/
     bucket_name = os.environ["BUCKET_NAME"]
-    gcs = gcs_storage.Client(project=os.environ.get("GOOGLE_CLOUD_PROJECT"))
+    gcs = make_gcs_client(project=os.environ.get("GOOGLE_CLOUD_PROJECT"))
     bucket = gcs.bucket(bucket_name)
     for document_path in source_files:
         loan_app_key = f"{case_number}/{GCS_LOAN_APPLICATION_PREFIX}/{document_path.name}"

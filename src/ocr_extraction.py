@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pymupdf
 from dotenv import load_dotenv
-from google.cloud import storage as gcs_storage
+from backends.gcs_backend import make_gcs_client
 from landingai_ade import LandingAIADE
 from landingai_ade.lib import pydantic_to_json_schema
 from landingai_ade.types import ExtractResponse, ParseResponse
@@ -187,7 +187,7 @@ class DocumentAI:
         """
         bucket_name = os.environ["BUCKET_NAME"]
         project = os.environ.get("GOOGLE_CLOUD_PROJECT")
-        gcs = gcs_storage.Client(project=project)
+        gcs = make_gcs_client(project=project)
         bucket = gcs.bucket(bucket_name)
 
         doc_stem = self.source_document_url.stem

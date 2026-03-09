@@ -8,20 +8,19 @@ import sys
 import threading
 from pathlib import Path
 
-import streamlit as st
-from dotenv import load_dotenv
-from google.cloud import storage as gcs_storage
-
 load_dotenv()
 
 # ── Constants ────────────────────────────────────────────────────────────────
 
 PROJECT_ROOT = Path(__file__).parent
 
-_logo_b64 = base64.b64encode((PROJECT_ROOT / "logo.png").read_bytes()).decode()
-
-# src/ on path so chatbot_graph can be imported without installing as a package
+# src/ on path — must be set before any src imports below
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
+
+import streamlit as st
+from backends.gcs_backend import make_gcs_client
+
+_logo_b64 = base64.b64encode((PROJECT_ROOT / "logo.png").read_bytes()).decode()
 
 RENDERABLE_EXTS = {".txt", ".md", ".json", ".pdf", ".jpg", ".jpeg", ".png"}
 
@@ -32,7 +31,7 @@ RENDERABLE_EXTS = {".txt", ".md", ".json", ".pdf", ".jpg", ".jpeg", ".png"}
 def _gcs_bucket():
     bucket_name = os.environ["BUCKET_NAME"]
     project = os.environ.get("GOOGLE_CLOUD_PROJECT")
-    client = gcs_storage.Client(project=project)
+    client = make_gcs_client(project=project)
     return client, client.bucket(bucket_name)
 
 
@@ -42,7 +41,7 @@ def _list_gcs_cases() -> list[str]:
     try:
         bucket_name = os.environ["BUCKET_NAME"]
         project = os.environ.get("GOOGLE_CLOUD_PROJECT")
-        client = gcs_storage.Client(project=project)
+        client = make_gcs_client(project=project)
         blobs = client.list_blobs(bucket_name, delimiter="/")
         list(blobs)  # consume iterator to populate prefixes
         return sorted(prefix.rstrip("/") for prefix in (blobs.prefixes or []))
@@ -57,7 +56,7 @@ def _list_gcs_files(prefix: str) -> list[str]:
     try:
         bucket_name = os.environ["BUCKET_NAME"]
         project = os.environ.get("GOOGLE_CLOUD_PROJECT")
-        client = gcs_storage.Client(project=project)
+        client = make_gcs_client(project=project)
         gcs_prefix = prefix.strip("/") + "/"
         blobs = client.list_blobs(bucket_name, prefix=gcs_prefix, delimiter="/")
         return sorted(

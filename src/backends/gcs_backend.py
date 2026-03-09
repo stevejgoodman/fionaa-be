@@ -3,12 +3,31 @@
 from __future__ import annotations
 
 import fnmatch
+import json
 import os
 import re
 from datetime import UTC, datetime
 
 from google.cloud import storage
 from google.cloud.exceptions import NotFound
+from google.oauth2 import service_account
+
+
+def make_gcs_client(project: str | None = None) -> storage.Client:
+    """Create a :class:`~google.cloud.storage.Client` using available credentials.
+
+    Credential lookup order:
+    1. ``GOOGLE_CREDENTIALS_JSON`` env var — service account JSON as a string.
+       Useful for cloud deployments (e.g. LangGraph Cloud) where credential
+       files cannot be placed on disk.
+    2. Standard Google auth (``GOOGLE_APPLICATION_CREDENTIALS``, ADC, etc.).
+    """
+    creds_json = os.environ.get("GOOGLE_CREDENTIALS_JSON", "").strip()
+    if creds_json:
+        info = json.loads(creds_json)
+        credentials = service_account.Credentials.from_service_account_info(info)
+        return storage.Client(project=project, credentials=credentials)
+    return storage.Client(project=project)
 
 from deepagents.backends.protocol import (
     BackendProtocol,
@@ -47,7 +66,8 @@ class GCSBackend(BackendProtocol):
         self._bucket_name = bucket_name or os.environ["BUCKET_NAME"]
         self._project = project or os.environ.get("GOOGLE_CLOUD_PROJECT")
         self._prefix = prefix.strip("/")
-        self._client = storage.Client(project=self._project)
+
+        self._client = make_gcs_client(project=self._project)
         self._bucket = self._client.bucket(self._bucket_name)
 
     # ------------------------------------------------------------------
