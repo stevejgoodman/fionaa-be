@@ -1,0 +1,49 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+.eggs/
+dist/
+build/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Local data & secrets — never bake into the image
+.env
+.secrets/
+data/
+ocr_output/
+lt_memories.db
+.langgraph_api/
+
+# Test / dev artefacts
+tests/
+notebooks/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+htmlcov/
+.coverage
+
+# Docs / misc
+*.md
+architecture.png
+example_eval.png
+loan_assessment_example.png
+LICENSE
+REPORT.md
+
+# Git
+.git/
+.gitignore
+
+# IDE
+.vscode/
+.idea/
+.cursor*/

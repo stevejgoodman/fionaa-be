@@ -89,12 +89,12 @@ def make_subagents(
     }
 
     if run_without_internet_search:
-        return [eligibility_subagent] # , financial_assessment_subagent]
+        return [eligibility_subagent , financial_assessment_subagent]
 
     return [
         eligibility_subagent,
         financial_assessment_subagent,
-        linkedin_subagent,
+        #linkedin_subagent,
         companies_house_subagent,
         internet_subagent,
     ]

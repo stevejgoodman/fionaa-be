@@ -10,21 +10,17 @@ Input state
 - ``messages``    : conversation history (human + AI turns)
 - ``case_number`` : identifies the case namespace in the shared store
 
-The chatbot tools use psycopg directly (sync) to read/write the ``store``
-table, which is the same PostgreSQL table used by the assessment pipeline's
-AsyncPostgresStore.  Using sync psycopg avoids asyncio event-loop affinity
-issues: LangGraph's ToolNode runs sync tools in a thread-pool executor, so
-no event loop is involved in the tool calls at all.
+Assessment findings are read from GCS (``<case_number>/reports/`` in the
+bucket).  Ephemeral chatbot notes are stored in an :class:`InMemoryStore`
+and are not persisted after the process exits.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
-import os
 from typing import Annotated, TypedDict
 
-import psycopg
 from dotenv import load_dotenv
 from langchain.chat_models import init_chat_model
 from langchain_core.runnables import RunnableConfig
@@ -33,10 +29,9 @@ from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import START, StateGraph
 from langgraph.graph.message import add_messages
 from langgraph.prebuilt import ToolNode, tools_condition
-from psycopg.rows import dict_row
-from psycopg.types.json import Jsonb
+from langgraph.store.memory import InMemoryStore
 
-#from vector_store import get_store
+from backends.gcs_backend import GCSBackend
 
 load_dotenv()
 
@@ -56,144 +51,92 @@ class ChatbotState(TypedDict):
 
 
 # ---------------------------------------------------------------------------
-# Store-scoped tool factory
+# Tool factory
 #
-# Tools are sync functions that call psycopg directly — the same approach used
-# by load_db_memories() in app.py.  LangGraph's async ToolNode runs sync tools
-# via run_in_executor (a thread-pool), so there is no event loop in scope
-# during the DB calls, which eliminates "Future attached to different loop"
-# errors that arise from AsyncPostgresStore's internal batcher.
-#
-# case_number is read from config["configurable"]["case_number"], which the
-# app sets on every graph.ainvoke() call alongside the thread_id.
+# GCS tools read assessment findings from <case_number>/reports/ in the
+# bucket.  Note tools read/write to an InMemoryStore for ephemeral session
+# notes.  case_number is read from config["configurable"]["case_number"].
 # ---------------------------------------------------------------------------
 
-# LangGraph stores namespace tuples as dot-joined strings in the prefix column.
-# ("memory", "user@example.com") → prefix = "memory.user@example.com"
-_NS_SEP = "."
 
+def _make_tools(store: InMemoryStore) -> list:
+    """Return tools bound to *store* via closure."""
 
-def _make_tools(pg_conn_string: str) -> list:
-    """Return the three store tools bound to *pg_conn_string* via closure."""
+    _gcs = GCSBackend()
 
     @tool
-    def list_memories(config: RunnableConfig) -> str:
-        """List all memory and findings entries saved for this case.
+    def list_case_files(config: RunnableConfig) -> str:
+        """List all assessment findings files available for this case.
 
-        Returns a bullet list of available entry keys that can be fetched
-        individually with the ``read_memory`` tool.
+        Returns a bullet list of file paths that can be fetched individually
+        with the ``read_case_file`` tool.
         """
         case_number = config.get("configurable", {}).get("case_number", "unknown")
-        prefix = f"memory{_NS_SEP}{case_number}"
-        with psycopg.connect(pg_conn_string, autocommit=True) as conn:
-            with conn.cursor(row_factory=dict_row) as cur:
-                cur.execute(
-                    "SELECT key FROM store WHERE prefix = %s ORDER BY key",
-                    (prefix,),
-                )
-                rows = cur.fetchall()
-        if not rows:
-            return f"No memory entries found for case '{case_number}'."
-        lines = [f"- {row['key']}" for row in rows]
-        return f"Memory entries for case '{case_number}':\n" + "\n".join(lines)
+        prefix = f"/{case_number}/reports/"
+        entries = _gcs.ls_info(prefix)
+        files = [e["path"] for e in entries if not e.get("is_dir")]
+        if not files:
+            return f"No assessment files found for case '{case_number}'."
+        lines = [f"- {f}" for f in files]
+        return f"Assessment files for case '{case_number}':\n" + "\n".join(lines)
 
     @tool
-    def read_memory(key: str, config: RunnableConfig) -> str:
-        """Read a specific memory or findings entry by its key.
+    def read_case_file(path: str, config: RunnableConfig) -> str:
+        """Read an assessment findings file from GCS.
 
         Args:
-            key: The entry key exactly as returned by ``list_memories``
-                 (e.g. ``"eligibility_findings.md"``).
+            path: The file path exactly as returned by ``list_case_files``
+                  (e.g. ``/case123/reports/eligibility_findings.md``).
         """
         case_number = config.get("configurable", {}).get("case_number", "unknown")
-        prefix = f"memory{_NS_SEP}{case_number}"
-        with psycopg.connect(pg_conn_string, autocommit=True) as conn:
-            with conn.cursor(row_factory=dict_row) as cur:
-                cur.execute(
-                    "SELECT value FROM store WHERE prefix = %s AND key = %s",
-                    (prefix, key),
-                )
-                row = cur.fetchone()
-        if row is None:
-            return f"No entry found for key '{key}' in case '{case_number}'."
-        value = row["value"]
-        # psycopg deserialises JSONB → dict; content is under the "content" key
-        if isinstance(value, dict):
-            return value.get("content", str(value))
-        return str(value)
+        clean_path = "/" + path.lstrip("/")
+        expected_prefix = f"/{case_number}/reports/"
+        if not clean_path.startswith(expected_prefix):
+            clean_path = f"{expected_prefix}{path.lstrip('/')}"
+        return _gcs.read(clean_path)
 
     @tool
-    def write_memory(key: str, content: str, config: RunnableConfig) -> str:
-        """Write or update a memory entry for this case.
+    def write_note(key: str, content: str, config: RunnableConfig) -> str:
+        """Write or update an ephemeral note for this chat session.
+
+        Notes are stored in memory only and are not persisted after the
+        session ends.
 
         Args:
-            key: Identifier for the entry (e.g. ``"chatbot_notes.md"``).
+            key: Identifier for the note (e.g. ``"summary"``).
             content: Full text content to store.
         """
         case_number = config.get("configurable", {}).get("case_number", "unknown")
-        prefix = f"memory{_NS_SEP}{case_number}"
-        with psycopg.connect(pg_conn_string, autocommit=True) as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    INSERT INTO store (prefix, key, value, created_at, updated_at)
-                    VALUES (%s, %s, %s, now(), now())
-                    ON CONFLICT (prefix, key) DO UPDATE
-                        SET value = EXCLUDED.value, updated_at = now()
-                    """,
-                    (prefix, key, Jsonb({"content": content})),
-                )
-        return f"Saved '{key}' to memory for case '{case_number}'."
+        store.put(("chatbot_notes", case_number), key, {"content": content})
+        return f"Saved note '{key}' for case '{case_number}'."
 
-    return [list_memories, read_memory, write_memory]
+    @tool
+    def read_note(key: str, config: RunnableConfig) -> str:
+        """Read an ephemeral note written earlier in this session.
 
+        Args:
+            key: The note key as used with ``write_note``.
+        """
+        case_number = config.get("configurable", {}).get("case_number", "unknown")
+        item = store.get(("chatbot_notes", case_number), key)
+        if item is None:
+            return f"No note found for key '{key}' in case '{case_number}'."
+        return item.value.get("content", str(item.value))
 
-@tool
-async def search_documents(query: str, config: RunnableConfig) -> str:
-    """Search the parsed document chunks for this case using semantic similarity.
-
-    Use this tool to find relevant passages from the documents uploaded for the
-    current case (bank statements, annual accounts, etc.).
-
-    Args:
-        query: Natural language question or search phrase.
-    """
-    case_number = config.get("configurable", {}).get("case_number", "unknown")
-
-    store = await get_store()
-    docs = await store.asimilarity_search(
-        query,
-        k=5,
-        filter={"case_number": case_number},
-    )
-
-    if not docs:
-        return f"No relevant document chunks found for case '{case_number}'."
-
-    parts = []
-    for i, doc in enumerate(docs, 1):
-        meta = doc.metadata
-        header = (
-            f"[Chunk {i} | type={meta.get('chunk_type', '?')} "
-            f"| page={meta.get('page_num', '?')}]"
-        )
-        parts.append(f"{header}\n{doc.page_content}")
-
-    return "\n\n---\n\n".join(parts)
+    return [list_case_files, read_case_file, write_note, read_note]
 
 
 _SYSTEM_PROMPT = """\
 You are Fionaa, an AI assistant for loan application case review.
 
-You have access to the assessment findings and notes stored for the current
+You have access to the assessment findings stored in GCS for the current
 case via the provided tools.
 
 Guidelines:
-- Call ``list_memories`` first if you are unsure what information is available.
-- Use ``search_documents`` to find relevant passages from the uploaded documents
-  (bank statements, annual accounts, etc.) when you need raw source evidence.
+- Call ``list_case_files`` first if you are unsure what information is available.
+- Use ``read_case_file`` to fetch the full content of a specific findings file.
 - Be concise and factual; do not speculate beyond the available case evidence.
-- When asked to save notes or updates, use ``write_memory``.
+- When asked to save notes or summaries, use ``write_note``.
 """
 
 
@@ -221,21 +164,18 @@ def _make_chatbot_node(model):
 async def build_chatbot_graph() -> object:
     """Build and compile the Fionaa chatbot graph.
 
-    Tools use psycopg sync to read/write the shared store table directly.
-    Conversation history is held in a MemorySaver checkpointer keyed by
-    ``thread_id`` (set to ``"chatbot-{case_number}"`` by the caller).
+    Assessment findings are read from GCS.  Ephemeral notes are stored in
+    an InMemoryStore.  Conversation history is held in a MemorySaver
+    checkpointer keyed by ``thread_id`` (set to ``"chatbot-{case_number}"``
+    by the caller).
 
     Returns:
         Compiled :class:`~langgraph.graph.StateGraph`.
     """
     logger.info("━━━ [build_chatbot_graph] Initialising")
 
-    pg_conn_string = (
-        f"postgresql://postgres:{os.environ['PG_PASSWORD']}"
-        f"@localhost/langchain"
-    )
-
-    tools = _make_tools(pg_conn_string) + [search_documents]
+    _store = InMemoryStore()
+    tools = _make_tools(_store)
     model = init_chat_model("anthropic:claude-sonnet-4-20250514").bind_tools(tools)
 
     builder = StateGraph(ChatbotState)

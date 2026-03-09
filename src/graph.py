@@ -274,7 +274,7 @@ async def build_graph(
     orchestrator_tools = (
         [read_external_file]
         if run_without_internet_search
-        else [read_external_file] + li_tools + ch_tools
+        else [read_external_file] + ch_tools #+ li_tools 
     )
     _assessment_agent = create_deep_agent(
         model=init_chat_model("anthropic:claude-sonnet-4-20250514"),

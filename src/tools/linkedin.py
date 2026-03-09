@@ -1,45 +1,37 @@
-"""LinkedIn MCP client factory.
-
-Prerequisites (run once from the linkedin-mcp-server directory):
-    uv run linkedin-mcp-server --get-session   # authenticate with LinkedIn
-    uv run playwright install chromium          # install browser if needed
-"""
+"""LinkedIn MCP client factory."""
 
 import os
-import shutil
-from pathlib import Path
 
+import google.auth.transport.requests
+from google.oauth2 import id_token as oauth2_id_token
 from langchain_mcp_adapters.client import MultiServerMCPClient
-
-LINKEDIN_SERVER_DIR = Path(os.path.expanduser("~/dev/linkedin-mcp-server"))
 
 
 async def get_linkedin_tools() -> list:
-    """Return a list of LangChain tools backed by the LinkedIn MCP server.
+    """Return a list of LangChain tools backed by the LinkedIn MCP server on Cloud Run.
 
-    The MCP server is started as a subprocess and communicates over stdio.
-    Call this once at startup and reuse the returned tool list.
+    Requires the ``LINKEDIN_MCP_SERVICE_URL`` environment variable to be set.
+    Uses IAM identity token auth for Cloud Run (requires roles/run.invoker on the service account).
+
+    Raises:
+        ValueError: If ``LINKEDIN_MCP_SERVICE_URL`` is not set in the environment.
     """
-    uv_path = shutil.which("uv") or "/opt/homebrew/bin/uv"
+    service_url = os.environ.get("LINKEDIN_MCP_SERVICE_URL", "").strip()
+    if not service_url:
+        raise ValueError(
+            "LINKEDIN_MCP_SERVICE_URL is not set. "
+            "Add it to the .env file in the project root."
+        )
 
-    env = os.environ.copy()
-    if "/opt/homebrew/bin" not in env.get("PATH", ""):
-        env["PATH"] = f"/opt/homebrew/bin:{env['PATH']}"
-    env["TRANSPORT"] = "stdio"
+    request = google.auth.transport.requests.Request()
+    token = oauth2_id_token.fetch_id_token(request, service_url)
 
     client = MultiServerMCPClient(
         {
             "linkedin": {
-                "command": uv_path,
-                "transport": "stdio",
-                "args": [
-                    "--directory",
-                    str(LINKEDIN_SERVER_DIR),
-                    "run",
-                    "linkedin-mcp-server",
-                ],
-                "cwd": str(LINKEDIN_SERVER_DIR),
-                "env": env,
+                "transport": "streamable_http",
+                "url": f"{service_url}/mcp",
+                "headers": {"Authorization": f"Bearer {token}"},
             }
         }
     )

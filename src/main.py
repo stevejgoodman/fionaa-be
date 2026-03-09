@@ -125,14 +125,14 @@ async def _main() -> None:
 
     # Build graph in this event loop so store/checkpointer use the same loop.
     graph = await build_graph(
-        run_without_internet_search=True,
+        run_without_internet_search=False,
     )
     report = await run_assessment(
         case_number='Synthesia',  # args.case,
         application_text=synthesia_application_str,
         thread_id='Synthesia', #args.thread,
         run_without_ocr=True,
-        run_without_internet_search=True,
+        run_without_internet_search=False,
         graph=graph,
     )
 

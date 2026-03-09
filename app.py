@@ -8,30 +8,96 @@ import sys
 import threading
 from pathlib import Path
 
-import psycopg
 import streamlit as st
 from dotenv import load_dotenv
+from google.cloud import storage as gcs_storage
 
 load_dotenv()
 
 # ── Constants ────────────────────────────────────────────────────────────────
 
 PROJECT_ROOT = Path(__file__).parent
-WORKSPACE_DIR = PROJECT_ROOT / "data" / "workspace"
 
 _logo_b64 = base64.b64encode((PROJECT_ROOT / "logo.png").read_bytes()).decode()
 
 # src/ on path so chatbot_graph can be imported without installing as a package
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
-
-def _pg_conn_string() -> str:
-    """Build the PostgreSQL connection string from the environment."""
-    password = os.environ.get("PG_PASSWORD", "")
-    return f"postgresql://postgres:{password}@localhost/langchain"
-
-
 RENDERABLE_EXTS = {".txt", ".md", ".json", ".pdf", ".jpg", ".jpeg", ".png"}
+
+
+# ── GCS helpers ──────────────────────────────────────────────────────────────
+
+
+def _gcs_bucket():
+    bucket_name = os.environ["BUCKET_NAME"]
+    project = os.environ.get("GOOGLE_CLOUD_PROJECT")
+    client = gcs_storage.Client(project=project)
+    return client, client.bucket(bucket_name)
+
+
+@st.cache_data(ttl=60)
+def _list_gcs_cases() -> list[str]:
+    """List all top-level case prefixes in the GCS bucket."""
+    try:
+        bucket_name = os.environ["BUCKET_NAME"]
+        project = os.environ.get("GOOGLE_CLOUD_PROJECT")
+        client = gcs_storage.Client(project=project)
+        blobs = client.list_blobs(bucket_name, delimiter="/")
+        list(blobs)  # consume iterator to populate prefixes
+        return sorted(prefix.rstrip("/") for prefix in (blobs.prefixes or []))
+    except Exception as exc:
+        st.sidebar.warning(f"GCS unavailable: {exc}")
+        return []
+
+
+@st.cache_data(ttl=60)
+def _list_gcs_files(prefix: str) -> list[str]:
+    """List all blob names directly under *prefix* (non-recursive)."""
+    try:
+        bucket_name = os.environ["BUCKET_NAME"]
+        project = os.environ.get("GOOGLE_CLOUD_PROJECT")
+        client = gcs_storage.Client(project=project)
+        gcs_prefix = prefix.strip("/") + "/"
+        blobs = client.list_blobs(bucket_name, prefix=gcs_prefix, delimiter="/")
+        return sorted(
+            blob.name for blob in blobs if not blob.name.endswith("/")
+        )
+    except Exception:
+        return []
+
+
+def _read_gcs_text(blob_name: str) -> str:
+    """Download a GCS blob as UTF-8 text."""
+    _, bucket = _gcs_bucket()
+    return bucket.blob(blob_name).download_as_text(encoding="utf-8")
+
+
+def _read_gcs_bytes(blob_name: str) -> bytes:
+    """Download a GCS blob as raw bytes."""
+    _, bucket = _gcs_bucket()
+    return bucket.blob(blob_name).download_as_bytes()
+
+
+def _blob_display_name(blob_name: str) -> str:
+    return blob_name.rstrip("/").split("/")[-1]
+
+
+def _blob_ext(blob_name: str) -> str:
+    return Path(_blob_display_name(blob_name)).suffix.lower()
+
+
+def file_icon(name: str) -> str:
+    ext = Path(name).suffix.lower()
+    return {
+        ".pdf": "📄",
+        ".jpg": "🖼️",
+        ".jpeg": "🖼️",
+        ".png": "🖼️",
+        ".json": "📋",
+        ".md": "📝",
+        ".txt": "🗒️",
+    }.get(ext, "📎")
 
 
 # ── Persistent async event loop + chatbot graph ───────────────────────────────
@@ -40,9 +106,7 @@ RENDERABLE_EXTS = {".txt", ".md", ".json", ".pdf", ".jpg", ".jpeg", ".png"}
 # The loop and the graph are cached TOGETHER as a single @st.cache_resource so
 # they are always the same pair.  If they were separate, Streamlit script
 # reloads would recreate the module-level loop while keeping the old cached
-# graph, causing "Future attached to a different loop" errors because the
-# AsyncPostgresStore's internal futures are bound to whichever loop was running
-# when the store was initialised.
+# graph, causing event loop affinity errors.
 
 
 @st.cache_resource
@@ -192,11 +256,7 @@ st.markdown(
 # ── Session state ────────────────────────────────────────────────────────────
 
 if "selected_file" not in st.session_state:
-    st.session_state.selected_file = None
-if "selected_source" not in st.session_state:
-    st.session_state.selected_source = None  # "workspace" | "memory"
-if "selected_memory_key" not in st.session_state:
-    st.session_state.selected_memory_key = None   # (prefix, key) tuple
+    st.session_state.selected_file = None  # GCS blob name string
 if "chat_messages" not in st.session_state:
     st.session_state.chat_messages = {}  # {case_number: [{"role": ..., "content": ...}]}
 
@@ -204,125 +264,22 @@ if "chat_messages" not in st.session_state:
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
 
-def file_icon(path: Path) -> str:
-    """Return an emoji icon for a given file path."""
-    if path.is_dir():
-        return "📁"
-    ext = path.suffix.lower()
-    return {
-        ".pdf": "📄",
-        ".jpg": "🖼️",
-        ".jpeg": "🖼️",
-        ".png": "🖼️",
-        ".json": "📋",
-        ".md": "📝",
-        ".txt": "🗒️",
-    }.get(ext, "📎")
-
-
-def load_workspace_tree(root: Path) -> dict:
-    """Recursively build a dict tree of the workspace directory."""
-    tree = {}
-    if not root.exists():
-        return tree
-    for item in sorted(root.iterdir(), key=lambda p: (p.is_file(), p.name.lower())):
-        if item.is_dir():
-            tree[item] = load_workspace_tree(item)
-        elif item.suffix.lower() in RENDERABLE_EXTS:
-            tree[item] = None
-    return tree
-
-
-def render_tree(tree: dict, depth: int = 0, top_dirs_as_expanders: bool = False) -> None:
-    """Render nested workspace tree as clickable buttons.
-
-    When *top_dirs_as_expanders* is True, directories at depth 0 are rendered
-    as collapsible ``st.expander`` widgets instead of inline headings.
-    """
-    for path, children in tree.items():
-        indent = "&nbsp;" * (depth * 4)
-        label = f"{indent}{file_icon(path)} {path.name}"
-        if children is not None:
-            if top_dirs_as_expanders and depth == 0:
-                with st.expander(f"📁 {path.name}", expanded=True):
-                    render_tree(children, depth + 1)
-            else:
-                st.markdown(
-                    f"<div style='font-size:0.62rem;color:#1565C0;padding:2px 0;font-weight:600'>"
-                    f"{label}</div>",
-                    unsafe_allow_html=True,
-                )
-                render_tree(children, depth + 1)
-        else:
-            if st.button(label, key=f"ws_{path}", use_container_width=True):
-                st.session_state.selected_file = path
-                st.session_state.selected_source = "workspace"
-                st.rerun()
-
-
-def load_db_memories() -> list[dict]:
-    """Load all memory records from the PostgreSQL store."""
-    try:
-        with psycopg.connect(
-            _pg_conn_string(), autocommit=True, row_factory=psycopg.rows.dict_row
-        ) as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    "SELECT prefix, key, value, updated_at FROM store ORDER BY prefix, key"
-                )
-                return [
-                    {
-                        "prefix": r["prefix"],
-                        "key": r["key"],
-                        "value": r["value"],   # psycopg returns JSONB as a Python dict
-                        "updated_at": r["updated_at"],
-                    }
-                    for r in cur.fetchall()
-                ]
-    except Exception as exc:
-        st.sidebar.warning(f"Memories unavailable: {exc}")
-        return []
-
-
-def parse_memory_value(raw) -> str | None:
-    """Extract text content from a memory store value.
-
-    Accepts a Python dict (psycopg JSONB deserialization), a JSON string,
-    or raw bytes — all produced by different store backends.
-    """
-    if raw is None:
-        return None
-    # psycopg deserialises JSONB → dict automatically
-    if isinstance(raw, dict):
-        data = raw
-    else:
-        try:
-            if isinstance(raw, (bytes, bytearray)):
-                raw = raw.decode("utf-8", errors="replace")
-            data = json.loads(raw)
-        except Exception:
-            return str(raw)
-    content = data.get("content", data)
-    if isinstance(content, list):
-        return "\n".join(str(line) for line in content)
-    return str(content)
-
-
-def render_file_content(path: Path) -> None:
-    """Render a workspace file in the main pane."""
-    ext = path.suffix.lower()
+def render_gcs_file_content(blob_name: str) -> None:
+    """Render a GCS file in the main pane."""
+    ext = _blob_ext(blob_name)
     st.markdown(
         f"<div style='font-size:0.78rem;color:#546E7A;margin-bottom:8px'>"
-        f"📂 {path.relative_to(PROJECT_ROOT)}</div>",
+        f"📂 {blob_name}</div>",
         unsafe_allow_html=True,
     )
 
     if ext in (".jpg", ".jpeg", ".png"):
-        st.image(str(path), use_container_width=True)
+        data = _read_gcs_bytes(blob_name)
+        st.image(data, use_container_width=True)
 
     elif ext == ".pdf":
-        with open(path, "rb") as f:
-            b64 = base64.b64encode(f.read()).decode()
+        data = _read_gcs_bytes(blob_name)
+        b64 = base64.b64encode(data).decode()
         st.markdown(
             f'<iframe src="data:application/pdf;base64,{b64}" '
             f'width="100%" height="700" style="border:none;border-radius:8px;"></iframe>',
@@ -330,88 +287,30 @@ def render_file_content(path: Path) -> None:
         )
 
     elif ext == ".md":
-        st.markdown(path.read_text(encoding="utf-8", errors="replace"))
+        st.markdown(_read_gcs_text(blob_name))
 
     elif ext == ".json":
+        text = _read_gcs_text(blob_name)
         try:
-            data = json.loads(path.read_text(encoding="utf-8", errors="replace"))
-            st.json(data)
+            st.json(json.loads(text))
         except json.JSONDecodeError:
-            st.code(path.read_text(encoding="utf-8", errors="replace"), language="json")
+            st.code(text, language="json")
 
     else:  # .txt and anything else
-        st.text(path.read_text(encoding="utf-8", errors="replace"))
-
-
-def _parse_prefix(prefix: str) -> tuple[str, str]:
-    """Split a dot-joined namespace prefix into (namespace_type, case_id).
-
-    ``"memory.stevejgoodman@gmail.com"`` → ``("memory", "stevejgoodman@gmail.com")``
-    ``"filesystem"``                      → ``("filesystem", "")``
-    """
-    parts = prefix.split(".", 1)
-    return (parts[0], parts[1]) if len(parts) == 2 else (parts[0], "")
-
-
-def render_memory_content(record: dict) -> None:
-    """Render a memory store record in the main pane."""
-    ns_type, case_id = _parse_prefix(record["prefix"])
-    breadcrumb = f"🧠 {ns_type}"
-    if case_id:
-        breadcrumb += f" &nbsp;›&nbsp; <b>{case_id}</b>"
-    breadcrumb += f" &nbsp;›&nbsp; {record['key'].lstrip('/')}"
-    st.markdown(
-        f"<div style='font-size:0.78rem;color:#546E7A;margin-bottom:8px'>{breadcrumb}</div>",
-        unsafe_allow_html=True,
-    )
-    text = parse_memory_value(record["value"])
-    if text:
-        # Try to detect if it looks like markdown
-        if any(marker in text for marker in ["##", "**", "---", "- "]):
-            st.markdown(text)
-        else:
-            st.text(text)
-    else:
-        st.info("No content available for this memory entry.")
+        st.text(_read_gcs_text(blob_name))
 
 
 def _infer_selected_case() -> str | None:
-    """Guess the active case_number from the current sidebar selection."""
-    if st.session_state.selected_source == "memory" and st.session_state.selected_memory_key:
-        prefix, _ = st.session_state.selected_memory_key
-        _, case_id = _parse_prefix(prefix)
-        return case_id or None
-    if st.session_state.selected_source == "workspace" and st.session_state.selected_file:
-        try:
-            rel = st.session_state.selected_file.relative_to(WORKSPACE_DIR / "ocr_output")
-            return rel.parts[0]
-        except (ValueError, IndexError):
-            return None
+    """Guess the active case_number from the currently selected file."""
+    if st.session_state.selected_file:
+        parts = st.session_state.selected_file.split("/")
+        return parts[0] if parts else None
     return None
 
 
-# ── Data loading (shared between sidebar and chat tab) ────────────────────────
+# ── Data loading ──────────────────────────────────────────────────────────────
 
-ocr_dir = WORKSPACE_DIR / "ocr_output"
-memories = load_db_memories()
-
-# Workspace cases: { case_name: Path }
-ws_cases: dict[str, Path] = {}
-if ocr_dir.exists():
-    for _item in sorted(ocr_dir.iterdir(), key=lambda p: p.name.lower()):
-        if _item.is_dir():
-            ws_cases[_item.name] = _item
-
-# Memory cases: { case_name: [record, ...] } — exclude filesystem namespace
-mem_cases: dict[str, list[dict]] = {}
-for m in memories:
-    ns_type, case_id = _parse_prefix(m["prefix"])
-    if ns_type == "filesystem":
-        continue
-    label = case_id or m["prefix"]
-    mem_cases.setdefault(label, []).append(m)
-
-all_cases = sorted(set(ws_cases.keys()) | set(mem_cases.keys()))
+all_cases = _list_gcs_cases()
 
 
 # ── Sidebar ───────────────────────────────────────────────────────────────────
@@ -425,40 +324,34 @@ with st.sidebar:
         for case_name in all_cases:
             with st.expander(f"📋 {case_name}", expanded=True):
 
-                # ── input_files ──────────────────────────────────────────────
-                if case_name in ws_cases:
+                # ── supporting docs (ocr_output) ─────────────────────────────
+                ocr_files = _list_gcs_files(f"{case_name}/ocr_output")
+                if ocr_files:
                     with st.expander("📂 supporting docs", expanded=True):
-                        _tree = load_workspace_tree(ws_cases[case_name])
-                        if _tree:
-                            render_tree(_tree)
-                        else:
-                            st.caption("No files.")
+                        for blob_name in ocr_files:
+                            name = _blob_display_name(blob_name)
+                            if Path(name).suffix.lower() not in RENDERABLE_EXTS:
+                                continue
+                            label = f"{file_icon(name)} {name}"
+                            if st.button(label, key=f"ocr_{blob_name}", use_container_width=True):
+                                st.session_state.selected_file = blob_name
+                                st.rerun()
 
-                # ── reports ──────────────────────────────────────────────────
-                if case_name in mem_cases:
+                # ── reports ───────────────────────────────────────────────────
+                report_files = _list_gcs_files(f"{case_name}/reports")
+                if report_files:
                     with st.expander("📊 reports", expanded=True):
-                        for rec in sorted(
-                            (
-                                r for r in mem_cases[case_name]
-                                if r["key"].lstrip("/") in ("report.md", "application_details.md")
-                                or r["key"].lstrip("/").endswith("_findings.md")
-                            ),
-                            key=lambda r: r["key"],
-                        ):
-                            display = rec["key"].lstrip("/")
-                            short = display if len(display) <= 32 else "…" + display[-29:]
-                            mem_key = f"mem_{rec['prefix']}_{rec['key']}"
-                            st.markdown('<div class="mem-link">', unsafe_allow_html=True)
+                        for blob_name in report_files:
+                            name = _blob_display_name(blob_name)
+                            short = name if len(name) <= 32 else "…" + name[-29:]
                             if st.button(
                                 f"🗒️ {short}",
-                                key=mem_key,
+                                key=f"rep_{blob_name}",
                                 use_container_width=True,
-                                help=f"{rec['prefix']} › {rec['key']}",
+                                help=blob_name,
                             ):
-                                st.session_state.selected_memory_key = (rec["prefix"], rec["key"])
-                                st.session_state.selected_source = "memory"
+                                st.session_state.selected_file = blob_name
                                 st.rerun()
-                            st.markdown("</div>", unsafe_allow_html=True)
 
 
 # ── Layout ───────────────────────────────────────────────────────────────────
@@ -485,24 +378,11 @@ tab_content, tab_chat = st.tabs(["📄 Content", "💬 Chat"])
 with tab_content:
     st.markdown('<div class="panel-heading">📄 Content</div>', unsafe_allow_html=True)
 
-    if st.session_state.selected_source == "workspace" and st.session_state.selected_file:
-        path = st.session_state.selected_file
-        if path.exists():
-            render_file_content(path)
-        else:
-            st.warning("File no longer exists.")
-
-    elif st.session_state.selected_source == "memory" and st.session_state.selected_memory_key:
-        sel = st.session_state.selected_memory_key  # (prefix, key) tuple
-        record = next(
-            (m for m in memories if (m["prefix"], m["key"]) == tuple(sel)),
-            None,
-        )
-        if record:
-            render_memory_content(record)
-        else:
-            st.warning("Memory record not found.")
-
+    if st.session_state.selected_file:
+        try:
+            render_gcs_file_content(st.session_state.selected_file)
+        except Exception as exc:
+            st.warning(f"Could not load file: {exc}")
     else:
         st.markdown(
             """
