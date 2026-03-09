@@ -33,6 +33,7 @@ from langchain_core.messages import HumanMessage
 from langchain_core.runnables import RunnableConfig
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, START, StateGraph
+from langgraph.store.base import BaseStore
 from langgraph.store.memory import InMemoryStore
 from langgraph.graph.message import MessagesState
 #from langgraph.store.postgres import AsyncPostgresStore
@@ -42,6 +43,7 @@ from ocr_extraction import DocumentAI
 from prompts.agent_prompts import RESEARCH_PROMPT
 from subagents import make_subagents
 from tools.companies_house import get_companies_house_tools
+from tools.document_retrieval import search_document_chunks
 from tools.filesystem import read_external_file
 from tools.linkedin import get_linkedin_tools
 
@@ -109,7 +111,7 @@ def _make_backend(runtime):
 # Graph nodes
 # ---------------------------------------------------------------------------
 
-def startup_node(state: State) -> dict:
+def startup_node(state: State, *, store: BaseStore) -> dict:
     """Parse, classify, extract, and persist all documents for the case.
 
     Reads source documents from ``data/<case_number>/`` on the local filesystem
@@ -189,6 +191,7 @@ def startup_node(state: State) -> dict:
 
         # Upload OCR output to GCS; returns the agent virtual path of the JSON
         ocr_virtual_path = doc.persist()
+        doc.embed_and_store(store)
         logger.info(
             "[startup] (%d/%d) OCR output at %s",
             i, len(source_files), ocr_virtual_path,
@@ -272,9 +275,9 @@ async def build_graph(
 
     # Build the orchestrator deep agent (no LinkedIn/CH/internet tools when run_without_internet_search)
     orchestrator_tools = (
-        [read_external_file]
+        [read_external_file, search_document_chunks]
         if run_without_internet_search
-        else [read_external_file] + ch_tools #+ li_tools 
+        else [read_external_file, search_document_chunks] + ch_tools #+ li_tools
     )
     _assessment_agent = create_deep_agent(
         model=init_chat_model("anthropic:claude-sonnet-4-20250514"),

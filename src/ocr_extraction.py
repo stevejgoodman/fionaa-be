@@ -229,51 +229,59 @@ class DocumentAI:
 
         return f"/disk-files/{json_key}"
 
-    # async def embed_and_store(self) -> int:
-    #     """Embed parse_result chunks and upsert into PGVectorStore, keyed by case_number.
+    def embed_and_store(self, store) -> int:
+        """Store parse_result chunks in the LangGraph store for semantic search.
 
-    #     Returns:
-    #         Number of chunks stored.
+        Each chunk is stored under the namespace ``("cases", case_number)`` so
+        that documents from different cases remain isolated.  The LangGraph
+        Platform will embed the stored values automatically using the embedding
+        model configured in ``langgraph.json``.
 
-    #     Raises:
-    #         ValueError: If parse() has not been called first.
-    #     """
-    #     if self.parse_result is None:
-    #         raise ValueError("parse() must be called before embed_and_store()")
+        Args:
+            store: The LangGraph ``BaseStore`` instance injected by the runtime.
 
-    #     store = await get_store()
+        Returns:
+            Number of chunks stored.
 
-    #     docs = []
-    #     for chunk in self.parse_result.chunks:
-    #         text = chunk.markdown
-    #         if not text or not text.strip():
-    #             continue
+        Raises:
+            ValueError: If parse() has not been called first.
+        """
+        if self.parse_result is None:
+            raise ValueError("parse() must be called before embed_and_store()")
 
-    #         # Use grounding to get page number and chunk type
-    #         grounding = self.parse_result.grounding.get(chunk.id)
-    #         page_num   = int(grounding.page) if grounding else 0
-    #         chunk_type = grounding.type      if grounding else "unknown"
+        namespace = ("cases", self.case_number)
+        count = 0
+        for chunk in self.parse_result.chunks:
+            text = chunk.markdown
+            if not text or not text.strip():
+                continue
 
-    #         docs.append(Document(
-    #             page_content=text,
-    #             metadata={
-    #                 "case_number": self.case_number,
-    #                 "chunk_type":  chunk_type,
-    #                 "page_num":    page_num,
-    #                 "chunk_id":    chunk.id,
-    #             },
-    #         ))
+            grounding = self.parse_result.grounding.get(chunk.id)
+            page_num = int(grounding.page) if grounding else 0
+            chunk_type = grounding.type if grounding else "unknown"
 
-    #     if not docs:
-    #         logger.warning("No non-empty chunks to embed for %s", self.source_document_url)
-    #         return 0
+            store.put(
+                namespace,
+                chunk.id,
+                {
+                    "text": text,
+                    "document_name": self.source_document_url.name,
+                    "document_type": self.document_type,
+                    "page_num": page_num,
+                    "chunk_type": chunk_type,
+                },
+            )
+            count += 1
 
-    #     ids = await store.aadd_documents(docs)
-    #     logger.info(
-    #         "Stored %d chunks in PGVectorStore (table=%s, case=%s)",
-    #         len(ids), PG_TABLE, self.case_number,
-    #     )
-    #     return len(ids)
+        if count == 0:
+            logger.warning(
+                "No non-empty chunks to embed for %s", self.source_document_url
+            )
+        else:
+            logger.info(
+                "Stored %d chunks in store (namespace=%s)", count, namespace
+            )
+        return count
 
 
 if __name__ == "__main__":
@@ -288,5 +296,5 @@ if __name__ == "__main__":
     #Persist does NOT call the Landing AI API — safe to run once extraction is complete.
     document.persist()
 
-    # Embed chunks and store in PGVectorStore
-    #asyncio.run(document.embed_and_store())
+    # embed_and_store requires a LangGraph store injected by the runtime;
+    # skip in standalone __main__ execution.

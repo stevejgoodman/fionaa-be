@@ -12,6 +12,7 @@ from prompts.agent_prompts import (
     INTERNET_SEARCH_PROMPT,
     LINKED_IN_PROMPT,
 )
+from tools.document_retrieval import search_document_chunks
 from tools.filesystem import read_external_file
 from tools.internet_search import internet_search
 
@@ -40,7 +41,7 @@ def make_subagents(
             "documents and the applicant's submitted financial documents."
         ),
         "model": "claude-haiku-4-5-20251001",
-        "tools": [read_external_file],
+        "tools": [read_external_file, search_document_chunks],
         "system_prompt": ELIGIBILITY_PROMPT,
     }
 
@@ -51,7 +52,7 @@ def make_subagents(
             "(bank statements, annual reports) and verify they meet eligibility criteria."
         ),
         "model": "claude-haiku-4-5-20251001",
-        "tools": [read_external_file],
+        "tools": [read_external_file, search_document_chunks],
         "system_prompt": FINANCIAL_ASSESSMENT_PROMPT,
     }
 
