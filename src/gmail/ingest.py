@@ -12,8 +12,13 @@ Usage
 
 Environment variables
 ---------------------
-    BUCKET_NAME    GCS bucket for PDF storage  (optional — local-only if unset)
-    GCP_PROJECT_ID GCP project ID              (optional — needed for GCS)
+    BUCKET_NAME         GCS bucket for PDF storage  (optional — local-only if unset)
+    GCP_PROJECT_ID      GCP project ID              (optional — needed for GCS)
+    LANGGRAPH_URL       LangGraph Cloud deployment URL (e.g. https://fionaa-xxx.us.langgraph.app)
+    LANGSMITH_API_KEY   LangSmith API key for authenticating with LangGraph Cloud
+
+    When LANGGRAPH_URL is set the graph is invoked remotely via the LangGraph
+    Cloud API.  When unset the graph is built and run in-process (local dev).
 """
 
 from __future__ import annotations
@@ -21,11 +26,14 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
+import os
 import re
 import sys
+import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from email.utils import parseaddr
+from pathlib import Path
 
 from dotenv import load_dotenv
 from googleapiclient.discovery import build
@@ -66,12 +74,71 @@ _fionaa_cache: object = None
 
 
 async def _get_graph():
-    """Return the compiled Fionaa graph, building it on first call."""
+    """Return the Fionaa graph — remote (LangGraph Cloud) or local.
+
+    When ``LANGGRAPH_URL`` is set, returns a :class:`RemoteGraph` that calls
+    the deployed LangGraph Cloud API.  Otherwise builds the graph in-process
+    (useful for local development).
+    """
     global _fionaa_cache
-    if _fionaa_cache is None:
+    if _fionaa_cache is not None:
+        return _fionaa_cache
+
+    langgraph_url = os.environ.get("LANGGRAPH_URL", "").strip()
+    if langgraph_url:
+        from langgraph.pregel.remote import RemoteGraph  # noqa: PLC0415
+        logger.info("Using remote LangGraph Cloud graph at %s", langgraph_url)
+        _fionaa_cache = RemoteGraph(
+            "fionaa",
+            url=langgraph_url,
+            api_key=os.environ.get("LANGSMITH_API_KEY"),
+        )
+    else:
+        logger.info("LANGGRAPH_URL not set — building graph in-process")
         from graph import build_graph  # noqa: PLC0415
         _fionaa_cache = await build_graph()
+
     return _fionaa_cache
+
+
+def _case_thread_id(case_number: str) -> str:
+    """Return a deterministic UUID string for a case_number.
+
+    LangGraph Cloud requires thread IDs to be UUIDs.  We derive a v5 UUID
+    from the case name so the same case always maps to the same thread.
+    """
+    return str(uuid.uuid5(uuid.NAMESPACE_OID, case_number))
+
+
+def _upload_attachments_to_gcs(attachments: list[str], case_number: str) -> None:
+    """Upload local attachment files to GCS under <case_number>/loan_application/.
+
+    When invoking the remote graph the startup_node runs on LangGraph Cloud
+    and has no access to the local filesystem.  Uploading the files to GCS
+    first ensures startup_node can find them there.
+    """
+    import sys
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+    from backends.gcs_backend import make_gcs_client
+    from config import GCS_LOAN_APPLICATION_PREFIX
+
+    bucket_name = os.environ.get("BUCKET_NAME", "").strip()
+    if not bucket_name:
+        logger.warning("BUCKET_NAME not set — skipping GCS upload of attachments")
+        return
+
+    project = os.environ.get("GOOGLE_CLOUD_PROJECT")
+    client = make_gcs_client(project=project)
+    bucket = client.bucket(bucket_name)
+
+    for local_path in attachments:
+        p = Path(local_path)
+        if not p.is_file():
+            logger.warning("Attachment not found, skipping GCS upload: %s", local_path)
+            continue
+        blob_name = f"{case_number}/{GCS_LOAN_APPLICATION_PREFIX}/{p.name}"
+        bucket.blob(blob_name).upload_from_filename(str(p))
+        logger.info("Uploaded attachment to GCS: %s", blob_name)
 
 
 async def ingest_email_to_graph(email_data: dict) -> dict:
@@ -81,6 +148,9 @@ async def ingest_email_to_graph(email_data: dict) -> dict:
     compiled graph.  The graph's ``startup_node`` derives ``case_number`` from
     the sender address and seeds the conversation with the email body
     (the applicant's loan application text).
+
+    When the graph is remote (LangGraph Cloud), PDF attachments are uploaded
+    to GCS before invocation so that startup_node can access them.
 
     Args:
         email_data: Dict produced by :func:`~gmail.extractor.extract_email_data`,
@@ -93,6 +163,13 @@ async def ingest_email_to_graph(email_data: dict) -> dict:
 
     # case_number must match the directory where attachments were saved (data/<case_number>/)
     case_number = _sender_dirname(email_data["from_email"])
+
+    attachments = email_data.get("pdf_attachments") or []
+
+    # For remote runs: upload attachments to GCS so startup_node can find them
+    if os.environ.get("LANGGRAPH_URL") and attachments:
+        _upload_attachments_to_gcs(attachments, case_number)
+
     email_input: dict = {
         "from": email_data["from_email"],
         "to": email_data["to_email"],
@@ -101,19 +178,17 @@ async def ingest_email_to_graph(email_data: dict) -> dict:
         "id": email_data["id"],
         "case_number": case_number,
     }
-    if email_data.get("pdf_attachments"):
-        email_input["pdf_attachments"] = email_data["pdf_attachments"]
-        logger.info(
-            "Attaching %d file path(s) to graph input",
-            len(email_data["pdf_attachments"]),
-        )
+    if attachments:
+        email_input["pdf_attachments"] = attachments
+        logger.info("Attaching %d file path(s) to graph input", len(attachments))
 
-    thread_id = case_number
+    # LangGraph Cloud requires UUID thread IDs
+    thread_id = _case_thread_id(case_number)
     config = {"configurable": {"thread_id": thread_id, "case_number": case_number}}
 
-    logger.info("Invoking assessment graph — thread_id=%s", thread_id)
+    logger.info("Invoking assessment graph — case=%s thread_id=%s", case_number, thread_id)
     result = await graph.ainvoke({"email_input": email_input}, config=config)
-    logger.info("Graph execution complete — thread_id=%s", thread_id)
+    logger.info("Graph execution complete — case=%s", case_number)
     return result
 
 

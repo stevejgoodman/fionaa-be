@@ -111,18 +111,78 @@ def _make_backend(runtime):
 # Graph nodes
 # ---------------------------------------------------------------------------
 
+def _get_source_files(
+    case_number: str,
+) -> tuple[list, object]:
+    """Locate source documents for *case_number*, preferring local disk then GCS.
+
+    When ``GOOGLE_CLOUD_PROJECT`` is set and the local landing-zone directory
+    does not exist, blobs under ``<case_number>/loan_application/`` in the GCS
+    bucket are downloaded to a temporary directory so that DocumentAI can
+    process them as normal local files.
+
+    Returns:
+        ``(source_files, tmpdir)`` where *source_files* is a list of
+        :class:`~pathlib.Path` objects and *tmpdir* is a
+        :class:`~tempfile.TemporaryDirectory` that must be kept alive until
+        processing is complete (``None`` when local files are used).
+    """
+    import tempfile
+    from pathlib import Path as _Path
+
+    data_dir = DATA_DIR / case_number
+    if data_dir.exists():
+        files = [p for p in data_dir.iterdir() if p.is_file()]
+        logger.info("[startup] Found %d local source file(s) in %s", len(files), data_dir)
+        return files, None
+
+    if not os.environ.get("GOOGLE_CLOUD_PROJECT"):
+        logger.warning("[startup] Local dir missing and GOOGLE_CLOUD_PROJECT not set — no source files")
+        return [], None
+
+    bucket_name = os.environ.get("BUCKET_NAME", "")
+    if not bucket_name:
+        logger.warning("[startup] Local dir missing and BUCKET_NAME not set — no source files")
+        return [], None
+
+    prefix = f"{case_number}/{GCS_LOAN_APPLICATION_PREFIX}/"
+    project = os.environ.get("GOOGLE_CLOUD_PROJECT")
+    gcs = make_gcs_client(project=project)
+    blobs = [
+        b for b in gcs.list_blobs(bucket_name, prefix=prefix)
+        if not b.name.endswith("/")
+    ]
+
+    if not blobs:
+        logger.warning("[startup] No blobs found in GCS at %s", prefix)
+        return [], None
+
+    tmpdir = tempfile.TemporaryDirectory(prefix="fionaa_startup_")
+    files = []
+    for blob in blobs:
+        filename = blob.name.split("/")[-1]
+        local_path = _Path(tmpdir.name) / filename
+        blob.download_to_filename(str(local_path))
+        files.append(local_path)
+        logger.info("[startup] Downloaded from GCS: %s → %s", blob.name, local_path)
+
+    return files, tmpdir
+
+
 def startup_node(state: State, *, store: BaseStore) -> dict:
     """Parse, classify, extract, and persist all documents for the case.
 
-    Reads source documents from ``data/<case_number>/`` on the local filesystem
-    (landing zone), uploads them to GCS under
-    ``<case_number>/loan_application/``, runs the Landing AI ADE pipeline on
-    each file, and uploads structured JSON extractions plus annotated PNGs to
-    GCS under ``<case_number>/ocr_output/``.
+    Source documents are resolved in order:
+    1. Local ``data/<case_number>/`` directory (local dev / CI).
+    2. GCS ``<case_number>/loan_application/`` (cloud deployment — files
+       uploaded there by ``ingest.py`` before graph invocation).
+
+    Runs the Landing AI ADE pipeline on each file and uploads structured JSON
+    extractions plus annotated PNGs to GCS under ``<case_number>/ocr_output/``.
 
     When ``email_input`` is present in state, ``case_number`` is derived from
-    the sender address (``email_input["from"]``) and the email body is injected
-    as the first :class:`~langchain_core.messages.HumanMessage`.
+    the sender address and the email body is injected as the first
+    :class:`~langchain_core.messages.HumanMessage`.
 
     Args:
         state: Current graph state.  Either ``case_number`` or ``email_input``
@@ -138,79 +198,62 @@ def startup_node(state: State, *, store: BaseStore) -> dict:
         or email_input.get("from")
         or state.get("case_number", "unknown")
     )
-    data_dir = DATA_DIR / case_number
 
     logger.info("━━━ [startup] case=%s", case_number)
 
-    if not data_dir.exists():
-        logger.warning("[startup] Document directory not found: %s", data_dir)
+    source_files, tmpdir = _get_source_files(case_number)
+
+    if not source_files:
         update: dict = {"case_number": case_number, "documents": []}
         application_text = email_input.get("body", "")
         if application_text:
             update["messages"] = [HumanMessage(content=application_text)]
         return update
 
-    source_files = [p for p in data_dir.iterdir() if p.is_file()]
-    logger.info("[startup] Found %d source file(s) in %s", len(source_files), data_dir)
+    # Upload local files to GCS only when they came from local disk
+    # (GCS-sourced files are already in the bucket).
+    if tmpdir is None and os.environ.get("BUCKET_NAME"):
+        bucket_name = os.environ["BUCKET_NAME"]
+        gcs = make_gcs_client(project=os.environ.get("GOOGLE_CLOUD_PROJECT"))
+        bucket = gcs.bucket(bucket_name)
+        for document_path in source_files:
+            loan_app_key = f"{case_number}/{GCS_LOAN_APPLICATION_PREFIX}/{document_path.name}"
+            bucket.blob(loan_app_key).upload_from_filename(str(document_path))
+            logger.info("[startup] Uploaded source doc to GCS: %s", loan_app_key)
 
-    # Upload source documents to GCS under <case_number>/loan_application/
-    bucket_name = os.environ["BUCKET_NAME"]
-    gcs = make_gcs_client(project=os.environ.get("GOOGLE_CLOUD_PROJECT"))
-    bucket = gcs.bucket(bucket_name)
-    for document_path in source_files:
-        loan_app_key = f"{case_number}/{GCS_LOAN_APPLICATION_PREFIX}/{document_path.name}"
-        bucket.blob(loan_app_key).upload_from_filename(str(document_path))
-        logger.info("[startup] Uploaded source doc to GCS: %s", loan_app_key)
+    try:
+        documents = []
+        for i, document_path in enumerate(source_files, start=1):
+            logger.info("[startup] (%d/%d) Parsing  → %s", i, len(source_files), document_path.name)
+            doc = DocumentAI(document_path, case_number=case_number)
+            doc.parse()
 
-    documents = []
-    for i, document_path in enumerate(source_files, start=1):
-        logger.info(
-            "[startup] (%d/%d) Parsing  → %s",
-            i, len(source_files), document_path.name,
-        )
-        doc = DocumentAI(document_path, case_number=case_number)
-        doc.parse()
+            logger.info("[startup] (%d/%d) Classifying → %s", i, len(source_files), document_path.name)
+            doc.classify()
+            logger.info("[startup] (%d/%d) Detected type: %s", i, len(source_files), doc.document_type)
 
-        logger.info(
-            "[startup] (%d/%d) Classifying → %s",
-            i, len(source_files), document_path.name,
-        )
-        doc.classify()
-        logger.info(
-            "[startup] (%d/%d) Detected type: %s",
-            i, len(source_files), doc.document_type,
-        )
+            logger.info("[startup] (%d/%d) Extracting fields → %s", i, len(source_files), document_path.name)
+            doc.extract()
 
-        logger.info(
-            "[startup] (%d/%d) Extracting fields → %s",
-            i, len(source_files), document_path.name,
-        )
-        doc.extract()
+            ocr_virtual_path = doc.persist()
+            doc.embed_and_store(store)
+            logger.info("[startup] (%d/%d) OCR output at %s", i, len(source_files), ocr_virtual_path)
 
-        # Upload OCR output to GCS; returns the agent virtual path of the JSON
-        ocr_virtual_path = doc.persist()
-        doc.embed_and_store(store)
-        logger.info(
-            "[startup] (%d/%d) OCR output at %s",
-            i, len(source_files), ocr_virtual_path,
-        )
-
-        documents.append(
-            {
-                "document_name": document_path.name,
-                "document_type": doc.document_type,
-                "ocr_output_path": ocr_virtual_path,
-            }
-        )
+            documents.append(
+                {
+                    "document_name": document_path.name,
+                    "document_type": doc.document_type,
+                    "ocr_output_path": ocr_virtual_path,
+                }
+            )
+    finally:
+        if tmpdir is not None:
+            tmpdir.cleanup()
 
     type_summary = ", ".join(d["document_type"] for d in documents) or "none"
-    logger.info(
-        "[startup] Complete — %d document(s) processed (%s)",
-        len(documents), type_summary,
-    )
+    logger.info("[startup] Complete — %d document(s) processed (%s)", len(documents), type_summary)
 
     update: dict = {"case_number": case_number, "documents": documents}
-
     application_text = email_input.get("body", "")
     if application_text:
         update["messages"] = [HumanMessage(content=application_text)]
