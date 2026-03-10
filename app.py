@@ -3,13 +3,23 @@
 import asyncio
 import base64
 import json
+import logging
 import os
 import sys
 import threading
+import time
 import uuid
 from pathlib import Path
-from  dotenv import load_dotenv
+from dotenv import load_dotenv
+
 load_dotenv()
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(name)s %(message)s",
+    stream=sys.stdout,
+)
+log = logging.getLogger("fionaa")
 
 # ── Constants ────────────────────────────────────────────────────────────────
 
@@ -47,6 +57,7 @@ def _list_gcs_cases() -> list[str]:
         list(blobs)  # consume iterator to populate prefixes
         return sorted(prefix.rstrip("/") for prefix in (blobs.prefixes or []))
     except Exception as exc:
+        log.error("GCS list_cases failed: %s", exc)
         st.sidebar.warning(f"GCS unavailable: {exc}")
         return []
 
@@ -63,7 +74,8 @@ def _list_gcs_files(prefix: str) -> list[str]:
         return sorted(
             blob.name for blob in blobs if not blob.name.endswith("/")
         )
-    except Exception:
+    except Exception as exc:
+        log.warning("GCS list_files failed for prefix=%s: %s", prefix, exc)
         return []
 
 
@@ -119,23 +131,24 @@ def _get_loop_and_chatbot():
     """
     langgraph_url = os.environ.get("LANGGRAPH_URL", "").strip()
     if langgraph_url:
+        log.info("Connecting to remote LangGraph at %s", langgraph_url)
         from langgraph.pregel.remote import RemoteGraph  # noqa: PLC0415
         graph = RemoteGraph(
             "chatbot",
             url=langgraph_url,
             api_key=os.environ.get("LANGSMITH_API_KEY"),
         )
-        # RemoteGraph is synchronous-friendly; wrap in a trivial loop so the
-        # rest of the app can keep using _run_async unchanged.
         loop = asyncio.new_event_loop()
         threading.Thread(target=loop.run_forever, daemon=True).start()
         return loop, graph
 
+    log.info("Building chatbot graph in-process")
     from chatbot_graph import build_chatbot_graph  # noqa: PLC0415
     loop = asyncio.new_event_loop()
     threading.Thread(target=loop.run_forever, daemon=True).start()
     future = asyncio.run_coroutine_threadsafe(build_chatbot_graph(), loop)
     graph = future.result(timeout=120)
+    log.info("Chatbot graph ready")
     return loop, graph
 
 
@@ -398,8 +411,10 @@ with tab_content:
 
     if st.session_state.selected_file:
         try:
+            log.info("Rendering file: %s", st.session_state.selected_file)
             render_gcs_file_content(st.session_state.selected_file)
         except Exception as exc:
+            log.error("Failed to render file %s: %s", st.session_state.selected_file, exc)
             st.warning(f"Could not load file: {exc}")
     else:
         st.markdown(
@@ -467,6 +482,8 @@ with tab_chat:
                 with st.spinner("Thinking…"):
                     graph = _get_chatbot()
                     thread_id = str(uuid.uuid5(uuid.NAMESPACE_OID, f"chatbot-{chat_case}"))
+                    log.info("Chat invoke case=%s thread=%s prompt_len=%d", chat_case, thread_id, len(prompt))
+                    t0 = time.monotonic()
                     result = _run_async(
                         graph.ainvoke(
                             {
@@ -476,6 +493,7 @@ with tab_chat:
                             config={"configurable": {"thread_id": thread_id, "case_number": chat_case}},
                         )
                     )
+                    log.info("Chat response case=%s elapsed=%.1fs", chat_case, time.monotonic() - t0)
 
                 ai_msg = result["messages"][-1]
                 ai_content = (

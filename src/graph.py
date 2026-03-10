@@ -1,10 +1,4 @@
 """LangGraph orchestration for the Fionaa loan application assessment pipeline.
-
-Graph topology
---------------
-START → [conditional] → startup → assessment_deepagent → END
-                └──────────────→ assessment_deepagent (when config run_without_ocr=True)
-
 * ``startup``              — runs OCR on every document attached to the case and
                              persists structured extractions to the workspace.
 * ``assessment_deepagent`` — deep-research orchestrator that delegates to
@@ -52,9 +46,6 @@ load_dotenv()
 logger = logging.getLogger(__name__)
 
 
-# ---------------------------------------------------------------------------
-# Graph state
-# ---------------------------------------------------------------------------
 
 class State(MessagesState):
     """State shared across all graph nodes."""
@@ -81,10 +72,6 @@ class State(MessagesState):
     """
 
 
-# ---------------------------------------------------------------------------
-# Backend factory
-# ---------------------------------------------------------------------------
-
 def _make_backend(runtime):
     """Create a :class:`CompositeBackend` for the deep agent.
 
@@ -105,11 +92,6 @@ def _make_backend(runtime):
     )
 
 
-
-
-# ---------------------------------------------------------------------------
-# Graph nodes
-# ---------------------------------------------------------------------------
 
 def _get_source_files(
     case_number: str,
@@ -269,9 +251,6 @@ def _route_after_start(state: State, config: RunnableConfig | None = None) -> st
     return "assessment_deepagent" if run_without_ocr else "startup"
 
 
-# ---------------------------------------------------------------------------
-# Graph builder
-# ---------------------------------------------------------------------------
 
 async def build_graph(
     run_without_internet_search: bool = False,

@@ -1,18 +1,11 @@
 """Chatbot LangGraph for case-scoped Q&A over assessment findings.
 
-Graph topology
---------------
-START → chatbot ─┬─[tool calls?]─→ tools → chatbot
-                 └─[done]─────────→ END
-
-Input state
------------
+Input
 - ``messages``    : conversation history (human + AI turns)
 - ``case_number`` : identifies the case namespace in the shared store
 
-Assessment findings are read from GCS (``<case_number>/reports/`` in the
-bucket).  Ephemeral chatbot notes are stored in an :class:`InMemoryStore`
-and are not persisted after the process exits.
+Assessment findings are read from GCS bucket``<case_number>/reports/`` 
+
 """
 
 from __future__ import annotations
@@ -41,10 +34,6 @@ load_dotenv()
 logger = logging.getLogger(__name__)
 
 
-# ---------------------------------------------------------------------------
-# State
-# ---------------------------------------------------------------------------
-
 
 class ChatbotState(TypedDict):
     """State for the Fionaa chatbot graph."""
@@ -54,8 +43,7 @@ class ChatbotState(TypedDict):
 
 
 # ---------------------------------------------------------------------------
-# Tool factory
-#
+
 # All tools read/write assessment findings in GCS under <case_number>/reports/.
 # case_number is read from config["configurable"]["case_number"].
 # ---------------------------------------------------------------------------
@@ -98,17 +86,25 @@ def _make_tools() -> list:
         return _gcs.read(clean_path)
 
     @tool
-    def write_note(path: str, content: str, config: RunnableConfig) -> str:
-        """Append a note to an existing assessment findings file in GCS.
+    def edit_file(path: str, old_text: str, new_text: str, config: RunnableConfig) -> str:
+        """Edit an assessment findings file in GCS by replacing specific text.
 
-        Use this when the user asks you to annotate, add a comment, or record
-        a finding against one of the report files.  The note is appended to
-        the bottom of the file and persists in GCS.
+        Use this to make targeted in-place edits: correct values, update names,
+        fix figures, or annotate specific lines.  The first occurrence of
+        ``old_text`` is replaced with ``new_text`` and the result is saved back
+        to GCS.
+
+        To append a new section, set ``old_text`` to the last line(s) of the file
+        and include that same text at the start of ``new_text`` followed by your
+        new content.
+
+        Always call ``read_case_file`` first so you have the exact text to match.
 
         Args:
             path: The file path exactly as returned by ``list_case_files``
                   (e.g. ``/case123/reports/eligibility_findings.md``).
-            content: Text to append to the file.
+            old_text: The exact literal text to find and replace (must exist in the file).
+            new_text: The replacement text.
         """
         case_number = config.get("configurable", {}).get("case_number", "unknown")
         clean_path = "/" + path.lstrip("/")
@@ -121,9 +117,14 @@ def _make_tools() -> list:
             existing = blob.download_as_text(encoding="utf-8")
         except NotFound:
             return f"Error: File '{clean_path}' not found. Use list_case_files to see available files."
-        updated = existing.rstrip("\n") + "\n\n---\n\n## Chatbot Note\n\n" + content + "\n"
+        if old_text not in existing:
+            return (
+                f"Error: The text to replace was not found in '{clean_path}'. "
+                "Use read_case_file to check the exact content before editing."
+            )
+        updated = existing.replace(old_text, new_text, 1)
         blob.upload_from_string(updated, content_type="text/plain; charset=utf-8")
-        return f"Note appended to '{clean_path}'."
+        return f"File '{clean_path}' updated successfully."
 
     @tool
     def search_documents(query: str, config: RunnableConfig) -> str:
@@ -140,7 +141,7 @@ def _make_tools() -> list:
         case_number = config.get("configurable", {}).get("case_number", "unknown")
         return _search_document_chunks.invoke({"query": query, "case_number": case_number})
 
-    return [list_case_files, read_case_file, write_note, search_documents]
+    return [list_case_files, read_case_file, edit_file, search_documents]
 
 
 _SYSTEM_PROMPT = """\
@@ -156,14 +157,12 @@ Guidelines:
   raw submitted documents (e.g. exact figures, dates, or passages not present
   in the findings files).
 - Be concise and factual; do not speculate beyond the available case evidence.
-- When asked to annotate or add a note to a report, use ``write_note`` with the
-  file path and the text to append.
+- To edit or annotate a report, first call ``read_case_file`` to get the exact
+  current text, then call ``edit_file`` with the exact ``old_text`` to replace
+  and the ``new_text`` to substitute.  Never guess at the exact text — always
+  read the file first.
 """
 
-
-# ---------------------------------------------------------------------------
-# Graph nodes
-# ---------------------------------------------------------------------------
 
 
 def _make_chatbot_node(model):
@@ -177,9 +176,6 @@ def _make_chatbot_node(model):
     return chatbot
 
 
-# ---------------------------------------------------------------------------
-# Graph builder
-# ---------------------------------------------------------------------------
 
 
 async def build_chatbot_graph() -> object:
@@ -198,7 +194,7 @@ async def build_chatbot_graph() -> object:
 
     _store = InMemoryStore()
     tools = _make_tools()
-    model = init_chat_model("anthropic:claude-sonnet-4-20250514").bind_tools(tools)
+    model = init_chat_model("anthropic:claude-haiku-4-5-20251001").bind_tools(tools)
 
     builder = StateGraph(ChatbotState)
     builder.add_node("chatbot", _make_chatbot_node(model))
