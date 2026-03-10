@@ -6,8 +6,9 @@ import json
 import os
 import sys
 import threading
+import uuid
 from pathlib import Path
-
+from  dotenv import load_dotenv
 load_dotenv()
 
 # ── Constants ────────────────────────────────────────────────────────────────
@@ -110,9 +111,27 @@ def file_icon(name: str) -> str:
 
 @st.cache_resource
 def _get_loop_and_chatbot():
-    """Create a persistent event loop and build the chatbot graph (once per process)."""
-    from chatbot_graph import build_chatbot_graph  # noqa: PLC0415
+    """Return a (loop, graph) pair for the chatbot.
 
+    When ``LANGGRAPH_URL`` is set the chatbot graph is accessed via the
+    LangGraph Cloud API (``RemoteGraph``).  Otherwise the graph is built
+    in-process so the app works standalone without a cloud deployment.
+    """
+    langgraph_url = os.environ.get("LANGGRAPH_URL", "").strip()
+    if langgraph_url:
+        from langgraph.pregel.remote import RemoteGraph  # noqa: PLC0415
+        graph = RemoteGraph(
+            "chatbot",
+            url=langgraph_url,
+            api_key=os.environ.get("LANGSMITH_API_KEY"),
+        )
+        # RemoteGraph is synchronous-friendly; wrap in a trivial loop so the
+        # rest of the app can keep using _run_async unchanged.
+        loop = asyncio.new_event_loop()
+        threading.Thread(target=loop.run_forever, daemon=True).start()
+        return loop, graph
+
+    from chatbot_graph import build_chatbot_graph  # noqa: PLC0415
     loop = asyncio.new_event_loop()
     threading.Thread(target=loop.run_forever, daemon=True).start()
     future = asyncio.run_coroutine_threadsafe(build_chatbot_graph(), loop)
@@ -447,7 +466,7 @@ with tab_chat:
             with st.chat_message("assistant"):
                 with st.spinner("Thinking…"):
                     graph = _get_chatbot()
-                    thread_id = f"chatbot-{chat_case}"
+                    thread_id = str(uuid.uuid5(uuid.NAMESPACE_OID, f"chatbot-{chat_case}"))
                     result = _run_async(
                         graph.ainvoke(
                             {

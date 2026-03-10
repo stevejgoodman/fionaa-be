@@ -31,9 +31,12 @@ from langgraph.graph.message import add_messages
 from langgraph.prebuilt import ToolNode, tools_condition
 from langgraph.store.memory import InMemoryStore
 
-from backends.gcs_backend import GCSBackend
+from google.cloud.exceptions import NotFound
 
-load_dotenv()
+from backends.gcs_backend import GCSBackend
+from tools.document_retrieval import search_document_chunks as _search_document_chunks
+
+load_dotenv()   
 
 logger = logging.getLogger(__name__)
 
@@ -53,14 +56,13 @@ class ChatbotState(TypedDict):
 # ---------------------------------------------------------------------------
 # Tool factory
 #
-# GCS tools read assessment findings from <case_number>/reports/ in the
-# bucket.  Note tools read/write to an InMemoryStore for ephemeral session
-# notes.  case_number is read from config["configurable"]["case_number"].
+# All tools read/write assessment findings in GCS under <case_number>/reports/.
+# case_number is read from config["configurable"]["case_number"].
 # ---------------------------------------------------------------------------
 
 
-def _make_tools(store: InMemoryStore) -> list:
-    """Return tools bound to *store* via closure."""
+def _make_tools() -> list:
+    """Return chatbot tools."""
 
     _gcs = GCSBackend()
 
@@ -96,34 +98,49 @@ def _make_tools(store: InMemoryStore) -> list:
         return _gcs.read(clean_path)
 
     @tool
-    def write_note(key: str, content: str, config: RunnableConfig) -> str:
-        """Write or update an ephemeral note for this chat session.
+    def write_note(path: str, content: str, config: RunnableConfig) -> str:
+        """Append a note to an existing assessment findings file in GCS.
 
-        Notes are stored in memory only and are not persisted after the
-        session ends.
+        Use this when the user asks you to annotate, add a comment, or record
+        a finding against one of the report files.  The note is appended to
+        the bottom of the file and persists in GCS.
 
         Args:
-            key: Identifier for the note (e.g. ``"summary"``).
-            content: Full text content to store.
+            path: The file path exactly as returned by ``list_case_files``
+                  (e.g. ``/case123/reports/eligibility_findings.md``).
+            content: Text to append to the file.
         """
         case_number = config.get("configurable", {}).get("case_number", "unknown")
-        store.put(("chatbot_notes", case_number), key, {"content": content})
-        return f"Saved note '{key}' for case '{case_number}'."
+        clean_path = "/" + path.lstrip("/")
+        expected_prefix = f"/{case_number}/reports/"
+        if not clean_path.startswith(expected_prefix):
+            clean_path = f"{expected_prefix}{path.lstrip('/')}"
+        key = clean_path.lstrip("/")
+        blob = _gcs._bucket.blob(key)
+        try:
+            existing = blob.download_as_text(encoding="utf-8")
+        except NotFound:
+            return f"Error: File '{clean_path}' not found. Use list_case_files to see available files."
+        updated = existing.rstrip("\n") + "\n\n---\n\n## Chatbot Note\n\n" + content + "\n"
+        blob.upload_from_string(updated, content_type="text/plain; charset=utf-8")
+        return f"Note appended to '{clean_path}'."
 
     @tool
-    def read_note(key: str, config: RunnableConfig) -> str:
-        """Read an ephemeral note written earlier in this session.
+    def search_documents(query: str, config: RunnableConfig) -> str:
+        """Search the applicant's original document chunks using semantic similarity.
+
+        Use this when you need to answer a specific question about the raw
+        content of submitted documents (bank statements, annual accounts) that
+        is not covered by the pre-written assessment findings files.
 
         Args:
-            key: The note key as used with ``write_note``.
+            query: Natural-language question or phrase, e.g.
+                   "monthly closing balance March 2024" or "total revenue".
         """
         case_number = config.get("configurable", {}).get("case_number", "unknown")
-        item = store.get(("chatbot_notes", case_number), key)
-        if item is None:
-            return f"No note found for key '{key}' in case '{case_number}'."
-        return item.value.get("content", str(item.value))
+        return _search_document_chunks.invoke({"query": query, "case_number": case_number})
 
-    return [list_case_files, read_case_file, write_note, read_note]
+    return [list_case_files, read_case_file, write_note, search_documents]
 
 
 _SYSTEM_PROMPT = """\
@@ -135,8 +152,12 @@ case via the provided tools.
 Guidelines:
 - Call ``list_case_files`` first if you are unsure what information is available.
 - Use ``read_case_file`` to fetch the full content of a specific findings file.
+- Use ``search_documents`` when asked a specific question about the applicant's
+  raw submitted documents (e.g. exact figures, dates, or passages not present
+  in the findings files).
 - Be concise and factual; do not speculate beyond the available case evidence.
-- When asked to save notes or summaries, use ``write_note``.
+- When asked to annotate or add a note to a report, use ``write_note`` with the
+  file path and the text to append.
 """
 
 
@@ -164,10 +185,11 @@ def _make_chatbot_node(model):
 async def build_chatbot_graph() -> object:
     """Build and compile the Fionaa chatbot graph.
 
-    Assessment findings are read from GCS.  Ephemeral notes are stored in
-    an InMemoryStore.  Conversation history is held in a MemorySaver
-    checkpointer keyed by ``thread_id`` (set to ``"chatbot-{case_number}"``
-    by the caller).
+    Assessment findings are read from GCS and notes are appended back to GCS
+    report files.  Conversation history is held in a MemorySaver checkpointer
+    keyed by ``thread_id`` (set to ``"chatbot-{case_number}"`` by the caller).
+    An InMemoryStore is compiled into the graph so that ``search_documents``
+    can access document chunks via ``get_store()``.
 
     Returns:
         Compiled :class:`~langgraph.graph.StateGraph`.
@@ -175,7 +197,7 @@ async def build_chatbot_graph() -> object:
     logger.info("━━━ [build_chatbot_graph] Initialising")
 
     _store = InMemoryStore()
-    tools = _make_tools(_store)
+    tools = _make_tools()
     model = init_chat_model("anthropic:claude-sonnet-4-20250514").bind_tools(tools)
 
     builder = StateGraph(ChatbotState)
@@ -186,7 +208,7 @@ async def build_chatbot_graph() -> object:
     builder.add_edge("tools", "chatbot")
     # tools_condition routes to END when there are no pending tool calls
 
-    graph = builder.compile(checkpointer=MemorySaver())
+    graph = builder.compile(checkpointer=MemorySaver(), store=_store)
     logger.info("[build_chatbot_graph] Ready")
     return graph
 
