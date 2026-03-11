@@ -1,11 +1,19 @@
 """Semantic retrieval tool — searches document chunks stored in the LangGraph store."""
 
+from typing import Annotated
+
 from langchain.tools import tool
-from langgraph.utils.config import get_store
+from langgraph.prebuilt import InjectedStore
+from langgraph.store.base import BaseStore
 
 
 @tool
-def search_document_chunks(query: str, case_number: str, k: int = 5) -> str:
+def search_document_chunks(
+    query: str,
+    case_number: str,
+    store: Annotated[BaseStore, InjectedStore()],
+    k: int = 5,
+) -> str:
     """Search the parsed document chunks for a case using semantic similarity.
 
     Use this tool when you need to answer a specific question about the content
@@ -23,7 +31,6 @@ def search_document_chunks(query: str, case_number: str, k: int = 5) -> str:
         Formatted string of the most relevant document chunks with their
         source document name, page number, and relevance score.
     """
-    store = get_store()
     if store is None:
         return "Document store is not available in this environment."
 

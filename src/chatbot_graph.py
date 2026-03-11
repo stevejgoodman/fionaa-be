@@ -14,6 +14,9 @@ import asyncio
 import logging
 from typing import Annotated, TypedDict
 
+from langgraph.prebuilt import InjectedStore
+from langgraph.store.base import BaseStore
+
 from dotenv import load_dotenv
 from langchain.chat_models import init_chat_model
 from langchain_core.runnables import RunnableConfig
@@ -25,7 +28,6 @@ from langgraph.prebuilt import ToolNode, tools_condition
 from google.cloud.exceptions import NotFound
 
 from backends.gcs_backend import GCSBackend
-from tools.document_retrieval import search_document_chunks as _search_document_chunks
 
 load_dotenv()   
 
@@ -125,7 +127,11 @@ def _make_tools() -> list:
         return f"File '{clean_path}' updated successfully."
 
     @tool
-    def search_documents(query: str, config: RunnableConfig) -> str:
+    def search_documents(
+        query: str,
+        config: RunnableConfig,
+        store: Annotated[BaseStore, InjectedStore()],
+    ) -> str:
         """Search the applicant's original document chunks using semantic similarity.
 
         Use this when you need to answer a specific question about the raw
@@ -137,7 +143,37 @@ def _make_tools() -> list:
                    "monthly closing balance March 2024" or "total revenue".
         """
         case_number = config.get("configurable", {}).get("case_number", "unknown")
-        return _search_document_chunks.invoke({"query": query, "case_number": case_number})
+        if store is None:
+            return "Document store is not available in this environment."
+
+        results = store.search(("cases", case_number), query=query, limit=5)
+
+        if not results:
+            return f"No document chunks found for case '{case_number}' matching: {query}"
+
+        lines = [f"Found {len(results)} chunk(s) for query: '{query}'\n"]
+        for i, item in enumerate(results, start=1):
+            v = item.value
+            score = f"{item.score:.3f}" if item.score is not None else "n/a"
+            chunk_text = (
+                f"--- Chunk {i} (score={score}) ---\n"
+                f"Source: {v.get('document_name', 'unknown')}  "
+                f"| Type: {v.get('document_type', '?')}  "
+                f"| Page: {v.get('page_num', '?')}  "
+                f"| Chunk type: {v.get('chunk_type', '?')}\n"
+                f"{v.get('text', '')}\n"
+            )
+            bbox_left = v.get("bbox_left")
+            if bbox_left is not None:
+                chunk_text += (
+                    f"[VISUAL_REF:case={case_number}"
+                    f"|doc={v.get('document_name', 'unknown')}"
+                    f"|page={v.get('page_num', 0)}"
+                    f"|bbox={bbox_left:.4f},{v.get('bbox_top', 0):.4f}"
+                    f",{v.get('bbox_right', 1):.4f},{v.get('bbox_bottom', 1):.4f}]\n"
+                )
+            lines.append(chunk_text)
+        return "\n".join(lines)
 
     return [list_case_files, read_case_file, edit_file, search_documents]
 
