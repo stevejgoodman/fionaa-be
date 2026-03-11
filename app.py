@@ -538,7 +538,7 @@ with tab_chat:
             with st.chat_message(msg["role"]):
                 st.markdown(msg["content"])
                 if msg["role"] == "assistant":
-                    _render_visual_refs(msg["content"])
+                    _render_visual_refs(msg.get("visual_refs", ""))
 
         # ── Chat input ────────────────────────────────────────────────────────
         if prompt := st.chat_input("Ask about this case…", key="chat_input"):
@@ -575,8 +575,21 @@ with tab_chat:
                     ai_msg.content if hasattr(ai_msg, "content") else str(ai_msg)
                 )
                 st.markdown(ai_content)
-                _render_visual_refs(ai_content)
+
+                # Extract VISUAL_REF markers from tool message results directly —
+                # the LLM often strips them from its final response, but they are
+                # always present in the raw tool output which we control.
+                tool_refs_text = "\n".join(
+                    msg.content
+                    for msg in result["messages"]
+                    if getattr(msg, "type", None) == "tool" and msg.content
+                )
+                _render_visual_refs(tool_refs_text)
 
             st.session_state.chat_messages[chat_case].append(
-                {"role": "assistant", "content": ai_content}
+                {
+                    "role": "assistant",
+                    "content": ai_content,
+                    "visual_refs": tool_refs_text,
+                }
             )
