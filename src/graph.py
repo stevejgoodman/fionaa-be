@@ -28,7 +28,6 @@ from langchain_core.runnables import RunnableConfig
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.store.base import BaseStore
-from langgraph.store.memory import InMemoryStore
 from langgraph.graph.message import MessagesState
 #from langgraph.store.postgres import AsyncPostgresStore
 
@@ -151,7 +150,7 @@ def _get_source_files(
     return files, tmpdir
 
 
-def startup_node(state: State, *, store: BaseStore) -> dict:
+def startup_node(state: State, *, store: BaseStore | None = None) -> dict:
     """Parse, classify, extract, and persist all documents for the case.
 
     Source documents are resolved in order:
@@ -218,7 +217,10 @@ def startup_node(state: State, *, store: BaseStore) -> dict:
             doc.extract()
 
             ocr_virtual_path = doc.persist()
-            doc.embed_and_store(store)
+            if store is not None:
+                doc.embed_and_store(store)
+            else:
+                logger.warning("[startup] No store available — skipping embed_and_store for %s", document_path.name)
             logger.info("[startup] (%d/%d) OCR output at %s", i, len(source_files), ocr_virtual_path)
 
             documents.append(
@@ -280,7 +282,6 @@ async def build_graph(
     # via GOOGLE_CREDENTIALS_JSON and written to a temp file here.
     setup_google_credentials()
 
-    _store = InMemoryStore()
     _checkpointer = MemorySaver()
 
     # Initialise MCP tool servers (async)
@@ -328,7 +329,7 @@ async def build_graph(
     builder.add_edge("startup", "assessment_deepagent")
     builder.add_edge("assessment_deepagent", END)
 
-    graph = builder.compile(checkpointer=_checkpointer, store=_store)
+    graph = builder.compile(checkpointer=_checkpointer)
 
     logger.info("[build_graph] Ready")
     return graph

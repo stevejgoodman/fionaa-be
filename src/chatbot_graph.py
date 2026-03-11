@@ -22,8 +22,6 @@ from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import START, StateGraph
 from langgraph.graph.message import add_messages
 from langgraph.prebuilt import ToolNode, tools_condition
-from langgraph.store.memory import InMemoryStore
-
 from google.cloud.exceptions import NotFound
 
 from backends.gcs_backend import GCSBackend
@@ -189,15 +187,16 @@ async def build_chatbot_graph() -> object:
     Assessment findings are read from GCS and notes are appended back to GCS
     report files.  Conversation history is held in a MemorySaver checkpointer
     keyed by ``thread_id`` (set to ``"chatbot-{case_number}"`` by the caller).
-    An InMemoryStore is compiled into the graph so that ``search_documents``
-    can access document chunks via ``get_store()``.
+
+    No store is compiled in — the LangGraph Platform injects the shared managed
+    store (configured in langgraph.json) at runtime, so ``search_documents``
+    reads the same chunks that the fionaa startup graph wrote.
 
     Returns:
         Compiled :class:`~langgraph.graph.StateGraph`.
     """
     logger.info("━━━ [build_chatbot_graph] Initialising")
 
-    _store = InMemoryStore()
     tools = _make_tools()
     model = init_chat_model("anthropic:claude-haiku-4-5-20251001").bind_tools(tools)
 
@@ -209,7 +208,7 @@ async def build_chatbot_graph() -> object:
     builder.add_edge("tools", "chatbot")
     # tools_condition routes to END when there are no pending tool calls
 
-    graph = builder.compile(checkpointer=MemorySaver(), store=_store)
+    graph = builder.compile(checkpointer=MemorySaver())
     logger.info("[build_chatbot_graph] Ready")
     return graph
 
