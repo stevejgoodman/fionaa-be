@@ -161,6 +161,11 @@ Guidelines:
   current text, then call ``edit_file`` with the exact ``old_text`` to replace
   and the ``new_text`` to substitute.  Never guess at the exact text — always
   read the file first.
+- When quoting content from ``search_documents`` results, you MUST copy any
+  ``[VISUAL_REF:...]`` markers that appear in the chunk text exactly as-is into
+  your response, immediately after the passage or figure you are referencing.
+  Do not paraphrase, shorten, or omit these markers — they are machine-readable
+  and will be used to display the source document image to the user.
 """
 
 

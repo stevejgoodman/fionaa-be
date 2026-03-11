@@ -5,7 +5,9 @@ import base64
 import json
 import logging
 import os
+import re
 import sys
+import tempfile
 import threading
 import time
 import uuid
@@ -30,6 +32,7 @@ sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
 import streamlit as st
 from backends.gcs_backend import make_gcs_client
+from helper import extract_chunk_image
 
 _logo_b64 = base64.b64encode((PROJECT_ROOT / "logo.png").read_bytes()).decode()
 
@@ -89,6 +92,76 @@ def _read_gcs_bytes(blob_name: str) -> bytes:
     """Download a GCS blob as raw bytes."""
     _, bucket = _gcs_bucket()
     return bucket.blob(blob_name).download_as_bytes()
+
+
+_PDF_TEMP_DIR = Path(tempfile.gettempdir()) / "fionaa_pdf_cache"
+_PDF_TEMP_DIR.mkdir(exist_ok=True)
+
+
+@st.cache_data(ttl=3600)
+def _get_local_pdf_path(blob_name: str) -> str | None:
+    """Download a GCS PDF blob to a local temp file and return the path.
+
+    Cached for 1 hour — PDFs don't change during a session.
+    """
+    import hashlib
+    safe_name = hashlib.md5(blob_name.encode()).hexdigest() + ".pdf"
+    local_path = _PDF_TEMP_DIR / safe_name
+    if not local_path.exists():
+        try:
+            pdf_bytes = _read_gcs_bytes(blob_name)
+            local_path.write_bytes(pdf_bytes)
+        except Exception as exc:
+            log.warning("Could not download PDF %s: %s", blob_name, exc)
+            return None
+    return str(local_path)
+
+
+_VISUAL_REF_RE = re.compile(r"\[VISUAL_REF:([^\]]+)\]")
+
+
+def _parse_visual_refs(text: str) -> list[dict]:
+    """Extract all [VISUAL_REF:...] markers from *text* and return as dicts."""
+    refs = []
+    for payload in _VISUAL_REF_RE.findall(text):
+        ref = {}
+        for part in payload.split("|"):
+            if "=" in part:
+                k, v = part.split("=", 1)
+                ref[k.strip()] = v.strip()
+        if {"case", "doc", "page", "bbox"}.issubset(ref):
+            refs.append(ref)
+    return refs
+
+
+def _render_visual_refs(text: str) -> None:
+    """Render any [VISUAL_REF:...] markers in *text* as cropped PDF images."""
+    refs = _parse_visual_refs(text)
+    if not refs:
+        return
+    for ref in refs:
+        try:
+            blob_name = f"{ref['case']}/loan_application/{ref['doc']}"
+            local_path = _get_local_pdf_path(blob_name)
+            if local_path is None:
+                continue
+            page_num = int(ref["page"])
+            bbox = [float(x) for x in ref["bbox"].split(",")]
+            img_bytes = extract_chunk_image(
+                pdf_path=local_path,
+                page_num=page_num,
+                bbox=bbox,
+                highlight=True,
+                padding=15,
+            )
+            if img_bytes:
+                st.image(
+                    img_bytes,
+                    caption=f"Source: {ref['doc']} — page {page_num + 1}",
+                    use_container_width=False,
+                )
+        except Exception as exc:
+            log.warning("Failed to render visual ref %s: %s", ref, exc)
 
 
 def _blob_display_name(blob_name: str) -> str:
@@ -464,6 +537,8 @@ with tab_chat:
         for msg in case_msgs:
             with st.chat_message(msg["role"]):
                 st.markdown(msg["content"])
+                if msg["role"] == "assistant":
+                    _render_visual_refs(msg["content"])
 
         # ── Chat input ────────────────────────────────────────────────────────
         if prompt := st.chat_input("Ask about this case…", key="chat_input"):
@@ -500,6 +575,7 @@ with tab_chat:
                     ai_msg.content if hasattr(ai_msg, "content") else str(ai_msg)
                 )
                 st.markdown(ai_content)
+                _render_visual_refs(ai_content)
 
             st.session_state.chat_messages[chat_case].append(
                 {"role": "assistant", "content": ai_content}

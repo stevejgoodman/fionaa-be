@@ -40,7 +40,7 @@ def search_document_chunks(query: str, case_number: str, k: int = 5) -> str:
     for i, item in enumerate(results, start=1):
         v = item.value
         score = f"{item.score:.3f}" if item.score is not None else "n/a"
-        lines.append(
+        chunk_text = (
             f"--- Chunk {i} (score={score}) ---\n"
             f"Source: {v.get('document_name', 'unknown')}  "
             f"| Type: {v.get('document_type', '?')}  "
@@ -48,5 +48,15 @@ def search_document_chunks(query: str, case_number: str, k: int = 5) -> str:
             f"| Chunk type: {v.get('chunk_type', '?')}\n"
             f"{v.get('text', '')}\n"
         )
+        bbox_left = v.get("bbox_left")
+        if bbox_left is not None:
+            chunk_text += (
+                f"[VISUAL_REF:case={case_number}"
+                f"|doc={v.get('document_name', 'unknown')}"
+                f"|page={v.get('page_num', 0)}"
+                f"|bbox={bbox_left:.4f},{v.get('bbox_top', 0):.4f}"
+                f",{v.get('bbox_right', 1):.4f},{v.get('bbox_bottom', 1):.4f}]\n"
+            )
+        lines.append(chunk_text)
 
     return "\n".join(lines)
