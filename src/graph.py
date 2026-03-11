@@ -28,6 +28,7 @@ from langchain_core.runnables import RunnableConfig
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.store.base import BaseStore
+from langgraph.store.memory import InMemoryStore
 from langgraph.graph.message import MessagesState
 #from langgraph.store.postgres import AsyncPostgresStore
 
@@ -282,6 +283,7 @@ async def build_graph(
     # via GOOGLE_CREDENTIALS_JSON and written to a temp file here.
     setup_google_credentials()
 
+    _store = InMemoryStore()
     _checkpointer = MemorySaver()
 
     # Initialise MCP tool servers (async)
@@ -329,7 +331,7 @@ async def build_graph(
     builder.add_edge("startup", "assessment_deepagent")
     builder.add_edge("assessment_deepagent", END)
 
-    graph = builder.compile(checkpointer=_checkpointer)
+    graph = builder.compile(checkpointer=_checkpointer, store=_store)
 
     logger.info("[build_graph] Ready")
     return graph

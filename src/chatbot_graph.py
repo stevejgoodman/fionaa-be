@@ -16,6 +16,7 @@ from typing import Annotated, TypedDict
 
 from langgraph.prebuilt import InjectedStore
 from langgraph.store.base import BaseStore
+from langgraph.store.memory import InMemoryStore
 
 from dotenv import load_dotenv
 from langchain.chat_models import init_chat_model
@@ -224,9 +225,10 @@ async def build_chatbot_graph() -> object:
     report files.  Conversation history is held in a MemorySaver checkpointer
     keyed by ``thread_id`` (set to ``"chatbot-{case_number}"`` by the caller).
 
-    No store is compiled in — the LangGraph Platform injects the shared managed
-    store (configured in langgraph.json) at runtime, so ``search_documents``
-    reads the same chunks that the fionaa startup graph wrote.
+    Compiled with an InMemoryStore as a placeholder — LangGraph Platform
+    replaces it with the shared managed store (configured in langgraph.json)
+    at runtime, so ``search_documents`` reads the same chunks that the fionaa
+    startup graph wrote.
 
     Returns:
         Compiled :class:`~langgraph.graph.StateGraph`.
@@ -244,7 +246,7 @@ async def build_chatbot_graph() -> object:
     builder.add_edge("tools", "chatbot")
     # tools_condition routes to END when there are no pending tool calls
 
-    graph = builder.compile(checkpointer=MemorySaver())
+    graph = builder.compile(checkpointer=MemorySaver(), store=InMemoryStore())
     logger.info("[build_chatbot_graph] Ready")
     return graph
 
