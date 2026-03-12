@@ -14,8 +14,7 @@ import asyncio
 import logging
 from typing import Annotated, TypedDict
 
-from langgraph.prebuilt import InjectedStore
-from langgraph.store.base import BaseStore
+from langchain_core.tools import InjectedToolArg
 from langgraph.store.memory import InMemoryStore
 from langgraph.runtime import Runtime
 
@@ -132,7 +131,7 @@ def _make_tools() -> list:
     def search_documents(
         query: str,
         config: RunnableConfig,
-        runtime: Runtime
+        runtime: Annotated[Runtime, InjectedToolArg()],
     ) -> str:
         """Search the applicant's original document chunks using semantic similarity.
 
@@ -145,10 +144,10 @@ def _make_tools() -> list:
                    "monthly closing balance March 2024" or "total revenue".
         """
         case_number = config.get("configurable", {}).get("case_number", "unknown")
-        if store is None:
+        if runtime.store is None:
             return "Document store is not available in this environment."
 
-        results = store.search(("cases", case_number), query=query, limit=5)
+        results = runtime.store.search(("cases", case_number), query=query, limit=5)
 
         if not results:
             return f"No document chunks found for case '{case_number}' matching: {query}"
