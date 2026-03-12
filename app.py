@@ -120,6 +120,11 @@ def _get_local_pdf_path(blob_name: str) -> str | None:
 _VISUAL_REF_RE = re.compile(r"\[VISUAL_REF:([^\]]+)\]")
 
 
+def _strip_visual_refs(text: str) -> str:
+    """Remove all [VISUAL_REF:...] markers from *text*."""
+    return _VISUAL_REF_RE.sub("", text).strip()
+
+
 def _parse_visual_refs(text: str) -> list[dict]:
     """Extract all [VISUAL_REF:...] markers from *text* and return as dicts."""
     refs = []
@@ -250,108 +255,257 @@ st.set_page_config(
 st.markdown(
     """
     <style>
-    /* Hide deploy button, hamburger menu and Streamlit's own header bar */
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+
+    /* ── Global reset ─────────────────────────────────────────────────────── */
     #MainMenu { visibility: hidden; }
     .stDeployButton { display: none; }
     [data-testid="stToolbar"] { display: none; }
     [data-testid="stHeader"] { display: none; }
 
-    /* Gradient header bar */
-    .fionaa-header {
-        background: linear-gradient(135deg, #1565C0 0%, #1E88E5 50%, #42A5F5 100%);
-        color: white;
-        padding: 14px 24px;
-        border-radius: 12px;
-        margin-bottom: 18px;
-        display: flex;
-        align-items: center;
-        gap: 12px;
-        box-shadow: 0 4px 16px rgba(30,136,229,0.25);
+    html, body, [class*="css"] {
+        font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
     }
 
-    /* Make Streamlit's wrapper around the header sticky */
+    /* ── App background ───────────────────────────────────────────────────── */
+    .stApp {
+        background-color: #F7F8FA;
+    }
+
+    /* ── Sticky header wrapper ────────────────────────────────────────────── */
     [data-testid="stMainBlockContainer"] > div:first-child {
         position: sticky;
         top: 0;
         z-index: 999;
-        background: white;
-        padding-bottom: 4px;
-    }
-    .fionaa-header h1 {
-        margin: 0;
-        font-size: 1.8rem;
-        font-weight: 700;
-        letter-spacing: 1px;
-    }
-    .fionaa-header p {
-        margin: 0;
-        font-size: 0.85rem;
-        opacity: 0.85;
+        background: #F7F8FA;
+        padding-bottom: 6px;
     }
 
-    /* Panel headings */
-    .panel-heading {
-        background: linear-gradient(90deg, #1E88E5, #42A5F5);
-        color: white;
-        padding: 7px 14px;
-        border-radius: 8px;
+    /* ── Header bar ───────────────────────────────────────────────────────── */
+    .fionaa-header {
+        background: #FFFFFF;
+        border-bottom: 1px solid #E5E8ED;
+        padding: 16px 28px;
+        border-radius: 12px;
+        margin-bottom: 20px;
+        display: flex;
+        align-items: center;
+        gap: 14px;
+        box-shadow: 0 1px 4px rgba(0,0,0,0.06);
+    }
+    .fionaa-header-text h1 {
+        margin: 0;
+        font-size: 1.35rem;
+        font-weight: 700;
+        color: #111827;
+        letter-spacing: -0.3px;
+    }
+    .fionaa-header-text p {
+        margin: 2px 0 0;
+        font-size: 0.78rem;
+        color: #6B7280;
+        font-weight: 400;
+        letter-spacing: 0.1px;
+    }
+    .fionaa-header-badge {
+        margin-left: auto;
+        background: #EFF6FF;
+        color: #1D4ED8;
+        font-size: 0.7rem;
         font-weight: 600;
-        font-size: 0.85rem;
-        letter-spacing: 0.5px;
-        margin-bottom: 10px;
+        padding: 4px 10px;
+        border-radius: 20px;
+        border: 1px solid #BFDBFE;
+        letter-spacing: 0.4px;
+    }
+
+    /* ── Sidebar ──────────────────────────────────────────────────────────── */
+    [data-testid="stSidebar"] {
+        background: #FFFFFF;
+        border-right: 1px solid #E5E8ED;
+    }
+    [data-testid="stSidebar"] [data-testid="stSidebarContent"] {
+        padding-top: 1.5rem;
+    }
+
+    /* ── Panel headings ───────────────────────────────────────────────────── */
+    .panel-heading {
+        color: #374151;
+        padding: 0 0 10px 0;
+        border-bottom: 2px solid #E5E8ED;
+        font-weight: 600;
+        font-size: 0.72rem;
+        letter-spacing: 0.8px;
+        margin-bottom: 14px;
         text-transform: uppercase;
     }
 
-    /* File tree items */
-    .stButton {
-        margin-bottom: 0 !important;
-        margin-top: 0 !important;
+    /* ── Sidebar expanders — strip every border/bg Streamlit adds ────────── */
+    [data-testid="stSidebar"] [data-testid="stExpander"],
+    [data-testid="stSidebar"] [data-testid="stExpander"] > details,
+    [data-testid="stSidebar"] details {
+        border: none !important;
+        border-radius: 0 !important;
+        background: transparent !important;
+        box-shadow: none !important;
+        outline: none !important;
+        margin: 0 !important;
+        padding: 0 !important;
     }
-    .stButton > button {
-        text-align: left !important;
+    [data-testid="stSidebar"] details > summary,
+    [data-testid="stSidebar"] [data-testid="stExpander"] summary {
+        font-size: 0.73rem !important;
+        font-weight: 600 !important;
+        color: #374151 !important;
+        padding: 5px 0 !important;
         background: transparent !important;
         border: none !important;
-        box-shadow: none !important;
-        outline: none !important;
-        color: #1A2D4A;
-        padding: 3px 0;
-        font-size: 0.62rem;
+        border-bottom: 1px solid #E5E8ED !important;
+        border-radius: 0 !important;
+        margin-bottom: 2px !important;
+        list-style: none;
     }
-    .stButton > button:hover,
-    .stButton > button:focus,
-    .stButton > button:active {
-        color: #1E88E5;
-        background: rgba(30,136,229,0.08) !important;
+    [data-testid="stSidebar"] details > summary:hover {
+        background: transparent !important;
+        color: #1D4ED8 !important;
+    }
+    [data-testid="stSidebar"] details > summary::-webkit-details-marker { display: none; }
+    [data-testid="stSidebar"] [data-testid="stExpanderDetails"],
+    [data-testid="stSidebar"] details > div {
+        padding: 0 !important;
         border: none !important;
-        box-shadow: none !important;
-        outline: none !important;
-        border-radius: 5px;
+        background: transparent !important;
     }
 
+    /* ── Sidebar file tree buttons ────────────────────────────────────────── */
+    [data-testid="stSidebar"] .stButton {
+        margin: 0 !important;
+        padding: 0 !important;
+    }
+    [data-testid="stSidebar"] .stButton > button,
+    [data-testid="stSidebar"] [data-testid^="stBaseButton"] {
+        text-align: left !important;
+        background: #FFFFFF !important;
+        border: none !important;
+        border-color: transparent !important;
+        box-shadow: none !important;
+        outline: none !important;
+        color: #4B5563;
+        padding: 1px 0 2px !important;
+        font-size: 0.72rem;
+        font-weight: 400;
+        border-radius: 0 !important;
+        width: 100%;
+        line-height: 1.35;
+        min-height: unset !important;
+        height: auto !important;
+        transition: color 0.1s;
+    }
+    [data-testid="stSidebar"] .stButton > button:hover,
+    [data-testid="stSidebar"] .stButton > button:focus,
+    [data-testid="stSidebar"] [data-testid^="stBaseButton"]:hover,
+    [data-testid="stSidebar"] [data-testid^="stBaseButton"]:focus {
+        color: #1D4ED8 !important;
+        background: #FFFFFF !important;
+        border: none !important;
+        border-color: transparent !important;
+        box-shadow: none !important;
+        outline: none !important;
+        text-decoration: underline !important;
+    }
+    [data-testid="stSidebar"] .stButton > button:active,
+    [data-testid="stSidebar"] [data-testid^="stBaseButton"]:active {
+        color: #1E40AF !important;
+        background: #FFFFFF !important;
+    }
 
-    /* Main content card */
+    /* ── Tabs ─────────────────────────────────────────────────────────────── */
+    [data-testid="stTabs"] [data-baseweb="tab-list"] {
+        background: transparent;
+        gap: 4px;
+        border-bottom: 2px solid #E5E8ED;
+    }
+    [data-testid="stTabs"] [data-baseweb="tab"] {
+        font-size: 0.82rem;
+        font-weight: 500;
+        color: #6B7280;
+        padding: 8px 16px;
+        border-radius: 6px 6px 0 0;
+        background: transparent;
+        border: none;
+    }
+    [data-testid="stTabs"] [aria-selected="true"] {
+        color: #1D4ED8 !important;
+        background: #EFF6FF !important;
+        border-bottom: 2px solid #1D4ED8 !important;
+    }
+
+    /* ── Content card area ────────────────────────────────────────────────── */
     .content-card {
-        background: white;
+        background: #FFFFFF;
         border-radius: 10px;
-        padding: 20px;
-        border: 1px solid #BBDEFB;
-        box-shadow: 0 2px 8px rgba(30,136,229,0.08);
+        padding: 24px;
+        border: 1px solid #E5E8ED;
+        box-shadow: 0 1px 4px rgba(0,0,0,0.05);
         min-height: 500px;
     }
 
-    /* Divider between panels */
-    .panel-divider {
-        border-left: 2px solid #BBDEFB;
-        height: 100%;
+    /* ── Chat messages ────────────────────────────────────────────────────── */
+    [data-testid="stChatMessage"] {
+        background: #FFFFFF;
+        border: 1px solid #E5E8ED;
+        border-radius: 10px;
+        padding: 12px 16px;
+        margin-bottom: 8px;
+        box-shadow: 0 1px 3px rgba(0,0,0,0.04);
     }
 
-    /* File icon colors */
-    .icon-pdf  { color: #E53935; }
-    .icon-img  { color: #8E24AA; }
-    .icon-json { color: #F57C00; }
-    .icon-md   { color: #2E7D32; }
-    .icon-txt  { color: #546E7A; }
-    .icon-dir  { color: #1E88E5; }
+    /* ── Chat input ───────────────────────────────────────────────────────── */
+    [data-testid="stChatInput"] {
+        border: 1px solid #D1D5DB !important;
+        border-radius: 10px !important;
+        background: #FFFFFF !important;
+        box-shadow: 0 1px 3px rgba(0,0,0,0.05) !important;
+    }
+    [data-testid="stChatInput"]:focus-within {
+        border-color: #1D4ED8 !important;
+        box-shadow: 0 0 0 3px rgba(29,78,216,0.08) !important;
+    }
+
+    /* ── Selectbox ────────────────────────────────────────────────────────── */
+    [data-testid="stSelectbox"] > div > div {
+        border-color: #D1D5DB !important;
+        border-radius: 8px !important;
+        font-size: 0.82rem !important;
+        background: #FFFFFF !important;
+    }
+
+    /* ── Divider ──────────────────────────────────────────────────────────── */
+    hr {
+        border-color: #E5E8ED !important;
+        margin: 12px 0 !important;
+    }
+
+    /* ── Clear button ─────────────────────────────────────────────────────── */
+    [data-testid="stButton"]:has(button[kind="secondary"]) button {
+        border: 1px solid #E5E8ED !important;
+        border-radius: 8px !important;
+        font-size: 0.78rem !important;
+        color: #6B7280 !important;
+    }
+    [data-testid="stButton"]:has(button[kind="secondary"]) button:hover {
+        border-color: #FCA5A5 !important;
+        color: #DC2626 !important;
+        background: #FEF2F2 !important;
+    }
+
+    /* ── File icon accent colours ─────────────────────────────────────────── */
+    .icon-pdf  { color: #DC2626; }
+    .icon-img  { color: #7C3AED; }
+    .icon-json { color: #D97706; }
+    .icon-md   { color: #059669; }
+    .icon-txt  { color: #6B7280; }
+    .icon-dir  { color: #1D4ED8; }
     </style>
     """,
     unsafe_allow_html=True,
@@ -420,36 +574,40 @@ all_cases = _list_gcs_cases()
 # ── Sidebar ───────────────────────────────────────────────────────────────────
 
 with st.sidebar:
-    st.markdown('<div class="panel-heading">📂 Cases</div>', unsafe_allow_html=True)
+    st.markdown('<div class="panel-heading">Cases</div>', unsafe_allow_html=True)
 
     if not all_cases:
         st.info("No cases found.")
     else:
         for case_name in all_cases:
-            with st.expander(f"📋 {case_name}", expanded=True):
+            if case_name == "loan_policy_documents":
+                continue
+            with st.expander(case_name, expanded=True):
 
                 # ── supporting docs (ocr_output) ─────────────────────────────
                 ocr_files = _list_gcs_files(f"{case_name}/ocr_output")
                 if ocr_files:
-                    with st.expander("📂 supporting docs", expanded=True):
+                    with st.expander("supporting docs", expanded=True):
                         for blob_name in ocr_files:
                             name = _blob_display_name(blob_name)
-                            if Path(name).suffix.lower() not in RENDERABLE_EXTS:
+                            ext = Path(name).suffix.lower()
+                            if ext not in RENDERABLE_EXTS or ext == ".json":
                                 continue
-                            label = f"{file_icon(name)} {name}"
-                            if st.button(label, key=f"ocr_{blob_name}", use_container_width=True):
+                            if st.button(name, key=f"ocr_{blob_name}", use_container_width=True):
                                 st.session_state.selected_file = blob_name
                                 st.rerun()
 
                 # ── reports ───────────────────────────────────────────────────
                 report_files = _list_gcs_files(f"{case_name}/reports")
                 if report_files:
-                    with st.expander("📊 reports", expanded=True):
+                    with st.expander("reports", expanded=True):
                         for blob_name in report_files:
                             name = _blob_display_name(blob_name)
+                            if Path(name).suffix.lower() == ".json":
+                                continue
                             short = name if len(name) <= 32 else "…" + name[-29:]
                             if st.button(
-                                f"🗒️ {short}",
+                                short,
                                 key=f"rep_{blob_name}",
                                 use_container_width=True,
                                 help=blob_name,
@@ -464,11 +622,12 @@ with st.sidebar:
 st.markdown(
     f"""
     <div class="fionaa-header">
-        <img src="data:image/png;base64,{_logo_b64}" style="height:40px;width:auto;" />
-        <div>
-            <h1>FIONAA</h1>
-            <p>FInancial ONline loan Application Assistant</p>
+        <img src="data:image/png;base64,{_logo_b64}" style="height:36px;width:auto;border-radius:6px;" />
+        <div class="fionaa-header-text">
+            <h1>Fionaa</h1>
+            <p>Financial Online Loan Application Assistant</p>
         </div>
+        <span class="fionaa-header-badge">BETA</span>
     </div>
     """,
     unsafe_allow_html=True,
@@ -480,7 +639,7 @@ tab_content, tab_chat = st.tabs(["📄 Content", "💬 Chat"])
 # ── Content tab ───────────────────────────────────────────────────────────────
 
 with tab_content:
-    st.markdown('<div class="panel-heading">📄 Content</div>', unsafe_allow_html=True)
+    st.markdown('<div class="panel-heading">Content</div>', unsafe_allow_html=True)
 
     if st.session_state.selected_file:
         try:
@@ -492,11 +651,11 @@ with tab_content:
     else:
         st.markdown(
             """
-            <div style="text-align:center;padding:80px 20px;color:#90A4AE;">
-                <div style="font-size:4rem;margin-bottom:16px;">🔵</div>
-                <div style="font-size:1.1rem;font-weight:600;color:#1E88E5;">Welcome to Fionaa</div>
-                <div style="font-size:0.9rem;margin-top:8px;">
-                    Select a file from the sidebar to view.
+            <div style="text-align:center;padding:100px 20px;color:#9CA3AF;">
+                <div style="font-size:3rem;margin-bottom:20px;opacity:0.4;">📂</div>
+                <div style="font-size:1rem;font-weight:600;color:#374151;margin-bottom:6px;">No file selected</div>
+                <div style="font-size:0.82rem;color:#9CA3AF;">
+                    Choose a case and file from the sidebar to get started.
                 </div>
             </div>
             """,
@@ -507,7 +666,7 @@ with tab_content:
 # ── Chat tab ──────────────────────────────────────────────────────────────────
 
 with tab_chat:
-    st.markdown('<div class="panel-heading">💬 Chat</div>', unsafe_allow_html=True)
+    st.markdown('<div class="panel-heading">Chat</div>', unsafe_allow_html=True)
 
     if not all_cases:
         st.info("No cases found. Run the assessment pipeline first.")
@@ -536,7 +695,7 @@ with tab_chat:
         case_msgs = st.session_state.chat_messages.get(chat_case, [])
         for msg in case_msgs:
             with st.chat_message(msg["role"]):
-                st.markdown(msg["content"])
+                st.markdown(_strip_visual_refs(msg["content"]))
                 if msg["role"] == "assistant":
                     _render_visual_refs(msg.get("visual_refs", ""))
 
@@ -580,7 +739,7 @@ with tab_chat:
                     return m.get("content", "") if isinstance(m, dict) else getattr(m, "content", "")
 
                 ai_content = _msg_content(ai_msg) or str(ai_msg)
-                st.markdown(ai_content)
+                st.markdown(_strip_visual_refs(ai_content))
 
                 # Extract VISUAL_REF markers from tool message results directly —
                 # the LLM often strips them from its final response, but they are

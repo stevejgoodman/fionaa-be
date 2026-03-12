@@ -166,7 +166,7 @@ def _make_tools() -> list:
                 from langgraph_sdk import get_sync_client
                 sdk_client = get_sync_client(url=langgraph_url, api_key=langsmith_api_key or None)
                 response = sdk_client.store.search_items(
-                    ("cases", case_number), query=query, limit=5
+                    ("cases", case_number), query=query, limit=1
                 )
                 raw_items = response.get("items", [])
                 logger.info("[search_documents] sdk fallback results=%d", len(raw_items))
@@ -207,7 +207,7 @@ def _make_tools() -> list:
             return "\n".join(lines)
 
         # Platform store is available — use it directly.
-        results = store.search(("cases", case_number), query=query, limit=5)
+        results = store.search(("cases", case_number), query=query, limit=1)
         logger.info("[search_documents] results=%d", len(results) if results else 0)
 
         if not results:
