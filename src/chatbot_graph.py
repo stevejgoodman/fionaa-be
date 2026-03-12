@@ -16,6 +16,7 @@ from typing import Annotated, TypedDict
 
 from langgraph.prebuilt import InjectedStore
 from langgraph.store.base import BaseStore
+from langgraph.store.memory import InMemoryStore
 
 from dotenv import load_dotenv
 from langchain.chat_models import init_chat_model
@@ -245,7 +246,7 @@ async def build_chatbot_graph() -> object:
     builder.add_edge("tools", "chatbot")
     # tools_condition routes to END when there are no pending tool calls
 
-    graph = builder.compile(checkpointer=MemorySaver())
+    graph = builder.compile(checkpointer=MemorySaver(), store=InMemoryStore())
     logger.info("[build_chatbot_graph] Ready")
     return graph
 
