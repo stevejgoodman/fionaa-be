@@ -17,6 +17,7 @@ from typing import Annotated, TypedDict
 from langgraph.prebuilt import InjectedStore
 from langgraph.store.base import BaseStore
 from langgraph.store.memory import InMemoryStore
+from langgraph.runtime import Runtime
 
 from dotenv import load_dotenv
 from langchain.chat_models import init_chat_model
@@ -131,7 +132,7 @@ def _make_tools() -> list:
     def search_documents(
         query: str,
         config: RunnableConfig,
-        store: Annotated[BaseStore, InjectedStore()],
+        runtime: Runtime
     ) -> str:
         """Search the applicant's original document chunks using semantic similarity.
 

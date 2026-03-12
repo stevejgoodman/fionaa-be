@@ -30,6 +30,8 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.store.base import BaseStore
 from langgraph.store.memory import InMemoryStore
 from langgraph.graph.message import MessagesState
+from langgraph.runtime import Runtime
+
 #from langgraph.store.postgres import AsyncPostgresStore
 
 from config import DATA_DIR, GCS_LOAN_APPLICATION_PREFIX
@@ -151,7 +153,7 @@ def _get_source_files(
     return files, tmpdir
 
 
-def startup_node(state: State, *, store: BaseStore | None = None) -> dict:
+def startup_node(state: State, runtime: Runtime) -> dict:
     """Parse, classify, extract, and persist all documents for the case.
 
     Source documents are resolved in order:
@@ -218,8 +220,8 @@ def startup_node(state: State, *, store: BaseStore | None = None) -> dict:
             doc.extract()
 
             ocr_virtual_path = doc.persist()
-            if store is not None:
-                doc.embed_and_store(store)
+            if runtime.store is not None:
+                doc.embed_and_store(runtime.store)
             else:
                 logger.warning("[startup] No store available — skipping embed_and_store for %s", document_path.name)
             logger.info("[startup] (%d/%d) OCR output at %s", i, len(source_files), ocr_virtual_path)
@@ -310,7 +312,7 @@ async def build_graph(
     _assessment_agent = create_deep_agent(
         model=init_chat_model("anthropic:claude-sonnet-4-20250514"),
         tools=orchestrator_tools,
-        # store=_store,
+        store=_store,
         backend=_make_backend,
         # checkpointer=_checkpointer,
         subagents=subagents,
