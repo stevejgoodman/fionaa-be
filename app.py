@@ -733,28 +733,53 @@ with tab_chat:
                 # RemoteGraph returns messages as dicts; in-process graph returns
                 # LangChain message objects.  Handle both.
                 def _msg_type(m) -> str:
-                    return m.get("type", "") if isinstance(m, dict) else getattr(m, "type", "")
+                    if isinstance(m, dict):
+                        return m.get("type", m.get("role", ""))
+                    return getattr(m, "type", "")
 
                 def _msg_content(m) -> str:
-                    return m.get("content", "") if isinstance(m, dict) else getattr(m, "content", "")
+                    c = m.get("content", "") if isinstance(m, dict) else getattr(m, "content", "")
+                    if isinstance(c, list):
+                        return " ".join(
+                            p.get("text", str(p)) if isinstance(p, dict) else str(p) for p in c
+                        )
+                    return c or ""
 
                 ai_content = _msg_content(ai_msg) or str(ai_msg)
                 st.markdown(_strip_visual_refs(ai_content))
 
-                # Extract VISUAL_REF markers from tool message results directly —
-                # the LLM often strips them from its final response, but they are
-                # always present in the raw tool output which we control.
+                # Extract VISUAL_REF markers from tool messages in the current turn only.
+                # result["messages"] is the full thread history (add_messages reducer),
+                # so slice from the last human/user message to avoid re-rendering
+                # refs from previous turns.
+                all_msgs = result["messages"]
+                log.info(
+                    "Chat message types: %s",
+                    [_msg_type(m) for m in all_msgs],
+                )
+                last_user_idx = max(
+                    (i for i, m in enumerate(all_msgs) if _msg_type(m) in ("human", "user")),
+                    default=0,
+                )
+                log.info(
+                    "Chat last_user_idx=%d total=%d tool_after=%d",
+                    last_user_idx, len(all_msgs),
+                    sum(1 for m in all_msgs[last_user_idx:] if _msg_type(m) == "tool"),
+                )
                 tool_refs_text = "\n".join(
                     _msg_content(msg)
-                    for msg in result["messages"]
+                    for msg in all_msgs[last_user_idx:]
                     if _msg_type(msg) == "tool" and _msg_content(msg)
                 )
-                _render_visual_refs(tool_refs_text)
+                # Also check the AI response itself — the prompt instructs the LLM
+                # to copy [VISUAL_REF:...] markers through into its reply.
+                combined_refs = "\n".join(filter(None, [tool_refs_text, ai_content]))
+                _render_visual_refs(combined_refs)
 
             st.session_state.chat_messages[chat_case].append(
                 {
                     "role": "assistant",
                     "content": ai_content,
-                    "visual_refs": tool_refs_text,
+                    "visual_refs": combined_refs,
                 }
             )

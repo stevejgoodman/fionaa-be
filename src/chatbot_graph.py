@@ -253,9 +253,11 @@ case via the provided tools.
 Guidelines:
 - Call ``list_case_files`` first if you are unsure what information is available.
 - Use ``read_case_file`` to fetch the full content of a specific findings file.
-- Use ``search_documents`` when asked a specific question about the applicant's
-  raw submitted documents (e.g. exact figures, dates, or passages not present
-  in the findings files).
+- ALWAYS call ``search_documents`` when answering any question that involves
+  specific figures, dates, names, balances, or passages from the applicant's
+  submitted documents — even if you have seen this information earlier in the
+  conversation. Do not rely on prior context; always fetch a fresh result so
+  the source document image can be displayed to the user.
 - Be concise and factual; do not speculate beyond the available case evidence.
 - To edit or annotate a report, first call ``read_case_file`` to get the exact
   current text, then call ``edit_file`` with the exact ``old_text`` to replace
