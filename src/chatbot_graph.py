@@ -143,10 +143,17 @@ def _make_tools() -> list:
         """
         case_number = config.get("configurable", {}).get("case_number", "unknown")
         store = get_runtime().store
+        logger.info(
+            "[search_documents] store=%s case=%s query=%r",
+            type(store).__name__ if store else "None",
+            case_number,
+            query,
+        )
         if store is None:
             return "Document store is not available in this environment."
 
         results = store.search(("cases", case_number), query=query, limit=5)
+        logger.info("[search_documents] results=%d", len(results) if results else 0)
 
         if not results:
             return f"No document chunks found for case '{case_number}' matching: {query}"
@@ -164,6 +171,10 @@ def _make_tools() -> list:
                 f"{v.get('text', '')}\n"
             )
             bbox_left = v.get("bbox_left")
+            logger.info(
+                "[search_documents] chunk=%d doc=%s bbox_left=%s",
+                i, v.get("document_name"), bbox_left,
+            )
             if bbox_left is not None:
                 chunk_text += (
                     f"[VISUAL_REF:case={case_number}"

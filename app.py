@@ -571,18 +571,24 @@ with tab_chat:
                     log.info("Chat response case=%s elapsed=%.1fs", chat_case, time.monotonic() - t0)
 
                 ai_msg = result["messages"][-1]
-                ai_content = (
-                    ai_msg.content if hasattr(ai_msg, "content") else str(ai_msg)
-                )
+                # RemoteGraph returns messages as dicts; in-process graph returns
+                # LangChain message objects.  Handle both.
+                def _msg_type(m) -> str:
+                    return m.get("type", "") if isinstance(m, dict) else getattr(m, "type", "")
+
+                def _msg_content(m) -> str:
+                    return m.get("content", "") if isinstance(m, dict) else getattr(m, "content", "")
+
+                ai_content = _msg_content(ai_msg) or str(ai_msg)
                 st.markdown(ai_content)
 
                 # Extract VISUAL_REF markers from tool message results directly —
                 # the LLM often strips them from its final response, but they are
                 # always present in the raw tool output which we control.
                 tool_refs_text = "\n".join(
-                    msg.content
+                    _msg_content(msg)
                     for msg in result["messages"]
-                    if getattr(msg, "type", None) == "tool" and msg.content
+                    if _msg_type(msg) == "tool" and _msg_content(msg)
                 )
                 _render_visual_refs(tool_refs_text)
 
