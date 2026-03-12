@@ -141,17 +141,72 @@ def _make_tools() -> list:
             query: Natural-language question or phrase, e.g.
                    "monthly closing balance March 2024" or "total revenue".
         """
+        import os
+        from langgraph.store.memory import InMemoryStore as _InMemoryStore
+
         case_number = config.get("configurable", {}).get("case_number", "unknown")
         store = get_runtime().store
+        store_type = type(store).__name__ if store else "None"
         logger.info(
             "[search_documents] store=%s case=%s query=%r",
-            type(store).__name__ if store else "None",
-            case_number,
-            query,
+            store_type, case_number, query,
         )
-        if store is None:
-            return "Document store is not available in this environment."
 
+        # When running in-process (local dev) the store is an empty InMemoryStore.
+        # Fall back to the LangGraph Platform store via the HTTP SDK so that chunks
+        # written by the fionaa graph on the platform are still searchable.
+        use_sdk_fallback = store is None or isinstance(store, _InMemoryStore)
+
+        if use_sdk_fallback:
+            langgraph_url = os.environ.get("LANGGRAPH_URL", "").strip()
+            langsmith_api_key = os.environ.get("LANGSMITH_API_KEY", "").strip()
+            if not langgraph_url:
+                return "Document store is not available (LANGGRAPH_URL not configured)."
+            try:
+                from langgraph_sdk import get_sync_client
+                sdk_client = get_sync_client(url=langgraph_url, api_key=langsmith_api_key or None)
+                response = sdk_client.store.search_items(
+                    ("cases", case_number), query=query, limit=5
+                )
+                raw_items = response.get("items", [])
+                logger.info("[search_documents] sdk fallback results=%d", len(raw_items))
+            except Exception as exc:
+                logger.warning("[search_documents] sdk fallback failed: %s", exc)
+                return f"Document store search failed: {exc}"
+
+            if not raw_items:
+                return f"No document chunks found for case '{case_number}' matching: {query}"
+
+            lines = [f"Found {len(raw_items)} chunk(s) for query: '{query}'\n"]
+            for i, item in enumerate(raw_items, start=1):
+                v = item.get("value", {})
+                score = item.get("score")
+                score_str = f"{score:.3f}" if score is not None else "n/a"
+                chunk_text = (
+                    f"--- Chunk {i} (score={score_str}) ---\n"
+                    f"Source: {v.get('document_name', 'unknown')}  "
+                    f"| Type: {v.get('document_type', '?')}  "
+                    f"| Page: {v.get('page_num', '?')}  "
+                    f"| Chunk type: {v.get('chunk_type', '?')}\n"
+                    f"{v.get('text', '')}\n"
+                )
+                bbox_left = v.get("bbox_left")
+                logger.info(
+                    "[search_documents] chunk=%d doc=%s bbox_left=%s",
+                    i, v.get("document_name"), bbox_left,
+                )
+                if bbox_left is not None:
+                    chunk_text += (
+                        f"[VISUAL_REF:case={case_number}"
+                        f"|doc={v.get('document_name', 'unknown')}"
+                        f"|page={v.get('page_num', 0)}"
+                        f"|bbox={bbox_left:.4f},{v.get('bbox_top', 0):.4f}"
+                        f",{v.get('bbox_right', 1):.4f},{v.get('bbox_bottom', 1):.4f}]\n"
+                    )
+                lines.append(chunk_text)
+            return "\n".join(lines)
+
+        # Platform store is available — use it directly.
         results = store.search(("cases", case_number), query=query, limit=5)
         logger.info("[search_documents] results=%d", len(results) if results else 0)
 
