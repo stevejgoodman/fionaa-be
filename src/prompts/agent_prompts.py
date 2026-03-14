@@ -8,8 +8,8 @@ __all__ = [
 ]
 
 
-# Hard coding this to run against my own company.
-TODAYS_DATE = '2015-11-30'  #datetime.date.today().isoformat()
+import datetime
+TODAYS_DATE = datetime.date.today().isoformat()
 
 # ---------------------------------------------------------------------------
 # Eligibility Assessment

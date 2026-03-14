@@ -377,46 +377,47 @@ st.markdown(
         background: transparent !important;
     }
 
-    /* ── Sidebar file tree buttons ────────────────────────────────────────── */
-    [data-testid="stSidebar"] .stButton {
-        margin: 0 !important;
-        padding: 0 !important;
-    }
-    [data-testid="stSidebar"] .stButton > button,
-    [data-testid="stSidebar"] [data-testid^="stBaseButton"] {
+    /* ── Sidebar file tree buttons ───────────────────────────────────────── */
+    [data-testid="stSidebar"] button {
+        border-color: #FFFFFF !important;
+        background-color: #FFFFFF !important;
+        box-shadow: none !important;
         text-align: left !important;
-        background: #FFFFFF !important;
-        border: none !important;
-        border-color: transparent !important;
-        box-shadow: none !important;
-        outline: none !important;
-        color: #4B5563;
-        padding: 1px 0 2px !important;
-        font-size: 0.72rem;
-        font-weight: 400;
-        border-radius: 0 !important;
-        width: 100%;
-        line-height: 1.35;
-        min-height: unset !important;
-        height: auto !important;
-        transition: color 0.1s;
+        color: #4B5563 !important;
+        font-size: 0.72rem !important;
+        font-weight: 400 !important;
+        width: 100% !important;
     }
-    [data-testid="stSidebar"] .stButton > button:hover,
-    [data-testid="stSidebar"] .stButton > button:focus,
-    [data-testid="stSidebar"] [data-testid^="stBaseButton"]:hover,
-    [data-testid="stSidebar"] [data-testid^="stBaseButton"]:focus {
+    [data-testid="stSidebar"] button:hover,
+    [data-testid="stSidebar"] button:focus {
         color: #1D4ED8 !important;
-        background: #FFFFFF !important;
-        border: none !important;
-        border-color: transparent !important;
+        text-decoration: underline !important;
+        border-color: #FFFFFF !important;
+        background-color: #FFFFFF !important;
         box-shadow: none !important;
         outline: none !important;
-        text-decoration: underline !important;
     }
-    [data-testid="stSidebar"] .stButton > button:active,
-    [data-testid="stSidebar"] [data-testid^="stBaseButton"]:active {
+    [data-testid="stSidebar"] button:active {
         color: #1E40AF !important;
+        border-color: #FFFFFF !important;
+        background-color: #FFFFFF !important;
+    }
+    [data-testid="stSidebar"] .stButton,
+    [data-testid="stSidebar"] .stButton > div,
+    [data-testid="stSidebar"] [data-testid^="stBaseButton"],
+    [data-testid="stSidebar"] [class*="ButtonContainer"] {
+        box-shadow: none !important;
         background: #FFFFFF !important;
+        padding: 0 !important;
+        margin: 0 !important;
+    }
+
+    /* ── Sidebar indentation per level ───────────────────────────────────── */
+    [data-testid="stSidebar"] details details > summary {
+        padding-left: 18px !important;
+    }
+    [data-testid="stSidebar"] details details button {
+        padding-left: 32px !important;
     }
 
     /* ── Tabs ─────────────────────────────────────────────────────────────── */
@@ -582,12 +583,12 @@ with st.sidebar:
         for case_name in all_cases:
             if case_name == "loan_policy_documents":
                 continue
-            with st.expander(case_name, expanded=True):
+            with st.expander(case_name, expanded=False):
 
                 # ── supporting docs (ocr_output) ─────────────────────────────
                 ocr_files = _list_gcs_files(f"{case_name}/ocr_output")
                 if ocr_files:
-                    with st.expander("supporting docs", expanded=True):
+                    with st.expander("supporting docs", expanded=False):
                         for blob_name in ocr_files:
                             name = _blob_display_name(blob_name)
                             ext = Path(name).suffix.lower()
@@ -600,10 +601,10 @@ with st.sidebar:
                 # ── reports ───────────────────────────────────────────────────
                 report_files = _list_gcs_files(f"{case_name}/reports")
                 if report_files:
-                    with st.expander("reports", expanded=True):
+                    with st.expander("reports", expanded=False):
                         for blob_name in report_files:
                             name = _blob_display_name(blob_name)
-                            if Path(name).suffix.lower() == ".json":
+                            if name != "report.md" and "findings" not in name.lower():
                                 continue
                             short = name if len(name) <= 32 else "…" + name[-29:]
                             if st.button(

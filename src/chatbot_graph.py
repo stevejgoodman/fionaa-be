@@ -25,6 +25,8 @@ from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import START, StateGraph
 from langgraph.graph.message import add_messages
 from langgraph.prebuilt import ToolNode, tools_condition
+from langgraph.cache.memory import InMemoryCache
+from langgraph.types import CachePolicy
 from google.cloud.exceptions import NotFound
 
 from backends.gcs_backend import GCSBackend
@@ -307,13 +309,13 @@ async def build_chatbot_graph() -> object:
 
     builder = StateGraph(ChatbotState)
     builder.add_node("chatbot", _make_chatbot_node(model))
-    builder.add_node("tools", ToolNode(tools))
+    builder.add_node("tools", ToolNode(tools), cache_policy=CachePolicy(ttl=3))
     builder.add_edge(START, "chatbot")
     builder.add_conditional_edges("chatbot", tools_condition)
     builder.add_edge("tools", "chatbot")
     # tools_condition routes to END when there are no pending tool calls
 
-    graph = builder.compile(checkpointer=MemorySaver(), store=InMemoryStore())
+    graph = builder.compile(checkpointer=MemorySaver(), store=InMemoryStore(), cache=InMemoryCache())
     logger.info("[build_chatbot_graph] Ready")
     return graph
 
