@@ -21,6 +21,7 @@ def make_subagents(
     li_tools: list,
     ch_tools: list,
     run_without_internet_search: bool = False,
+    run_without_linkedin: bool = False,
 ) -> list[dict]:
     """Build and return the list of subagent config dicts.
 
@@ -29,6 +30,7 @@ def make_subagents(
         ch_tools: Companies House MCP tool list (from ``get_companies_house_tools()``).
         run_without_internet_search: If True, return only eligibility and financial
             assessment subagents (no LinkedIn, Companies House, or internet search).
+        run_without_linkedin: If True, exclude the LinkedIn subagent.
 
     Returns:
         List of subagent configuration dicts ready to pass to ``create_deep_agent``.
@@ -90,12 +92,10 @@ def make_subagents(
     }
 
     if run_without_internet_search:
-        return [eligibility_subagent , financial_assessment_subagent]
+        return [eligibility_subagent, financial_assessment_subagent]
 
-    return [
-        eligibility_subagent,
-        financial_assessment_subagent,
-        #linkedin_subagent,
-        companies_house_subagent,
-        internet_subagent,
-    ]
+    agents = [eligibility_subagent, financial_assessment_subagent]
+    if not run_without_linkedin:
+        agents.append(linkedin_subagent)
+    agents += [companies_house_subagent, internet_subagent]
+    return agents

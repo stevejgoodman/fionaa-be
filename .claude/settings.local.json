@@ -1,9 +1,0 @@
-{
-  "permissions": {
-    "allow": [
-      "WebFetch(domain:blog.langchain.com)",
-      "WebSearch",
-      "Bash(ls /Users/stevegoodman/dev/fionaa-be/setup.*)"
-    ]
-  }
-}

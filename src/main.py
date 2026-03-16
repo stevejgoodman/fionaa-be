@@ -20,7 +20,6 @@ from dotenv import load_dotenv
 from langchain_core.messages import HumanMessage
 
 from graph import build_graph
-from application_forms import steve_application_str, synthesia_application_str
 
 load_dotenv()
 
@@ -113,7 +112,10 @@ def _parse_args() -> argparse.Namespace:
 
 async def _main() -> None:
     args = _parse_args()
-    application_text = args.application or steve_application_str
+    if not args.application:
+        print("Error: --application is required", file=sys.stderr)
+        sys.exit(1)
+    application_text = args.application
     run_without_ocr = os.environ.get("RUN_WITHOUT_OCR", "").lower() in (
         "1",
         "true",
@@ -125,14 +127,14 @@ async def _main() -> None:
 
     # Build graph in this event loop so store/checkpointer use the same loop.
     graph = await build_graph(
-        run_without_internet_search=False,
+        run_without_internet_search=run_without_internet_search,
     )
     report = await run_assessment(
-        case_number='Synthesia',  # args.case,
-        application_text=synthesia_application_str,
-        thread_id='Synthesia', #args.thread,
-        run_without_ocr=True,
-        run_without_internet_search=False,
+        case_number=args.case,
+        application_text=application_text,
+        thread_id=args.thread,
+        run_without_ocr=run_without_ocr,
+        run_without_internet_search=run_without_internet_search,
         graph=graph,
     )
 

@@ -216,3 +216,4 @@ ocr_output
 notebooks/ocr_output/
 lt_memories.db
 .langgraph_api/
+.claude/settings.local.json

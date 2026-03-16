@@ -259,6 +259,7 @@ def _route_after_start(state: State, config: RunnableConfig | None = None) -> st
 
 async def build_graph(
     run_without_internet_search: bool = False,
+    run_without_linkedin: bool = False,
 ) -> tuple:
     """Build and compile the Fionaa assessment graph.
 
@@ -267,7 +268,8 @@ async def build_graph(
 
     The compiled graph is returned without a custom checkpointer or store so
     that ``langgraph dev`` / LangGraph API can inject its own managed
-    p
+    persistence layer.
+
     Args:
         run_without_internet_search: If True, only eligibility and financial
             assessment subagents are used (no LinkedIn, Companies House, or
@@ -297,7 +299,10 @@ async def build_graph(
 
     # Build subagent configs
     subagents = make_subagents(
-        li_tools, ch_tools, run_without_internet_search=run_without_internet_search
+        li_tools,
+        ch_tools,
+        run_without_internet_search=run_without_internet_search,
+        run_without_linkedin=run_without_linkedin,
     )
     logger.info("[build_graph] %d subagent(s) configured", len(subagents))
 
