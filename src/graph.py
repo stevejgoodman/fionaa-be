@@ -267,9 +267,7 @@ async def build_graph(
 
     The compiled graph is returned without a custom checkpointer or store so
     that ``langgraph dev`` / LangGraph API can inject its own managed
-    persistence layer.  The deep agent still uses its own internal
-    SqliteStore + MemorySaver for cross-turn memory within a single run.
-
+    p
     Args:
         run_without_internet_search: If True, only eligibility and financial
             assessment subagents are used (no LinkedIn, Companies House, or
