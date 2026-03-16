@@ -1,4 +1,4 @@
-# Add your utilities or helper functions to this file.
+# Add your utilities that deal with OCR - display document and draw bounding boxes around fragments of it.
 import io
 from functools import lru_cache
 from pathlib import Path

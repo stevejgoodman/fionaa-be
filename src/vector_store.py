@@ -1,5 +1,5 @@
 """PGVectorStore setup and helpers for ADE document chunks.
-
+Used for localhost and assumes postgres and pgvector already installed.
 Run this module directly uv run python src/vector_store.py to create the ade_documents table in Postgres. 
  the table is only created if it does not already exist.
 """

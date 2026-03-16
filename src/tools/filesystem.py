@@ -1,46 +1,41 @@
-"""Read-only filesystem tool for agent access to workspace files."""
-
-from pathlib import Path
+"""Read-only GCS tool for agent access to workspace files."""
 
 from langchain.tools import tool
 
-from config import WORKSPACE
+from backends.gcs_backend import GCSBackend
+
+_gcs: GCSBackend | None = None
 
 
-def is_allowed(path: Path) -> bool:
-    """Return True if *path* is within the allowed workspace tree."""
-    return str(path.resolve()).startswith(str(WORKSPACE.resolve()))
+def _get_gcs() -> GCSBackend:
+    global _gcs
+    if _gcs is None:
+        _gcs = GCSBackend()
+    return _gcs
 
 
 @tool
 def read_external_file(path: str) -> str:
-    """Read a readonly file from the workspace directory.
+    """Read a file from the GCS workspace.
 
-    Pass a path relative to the workspace root, e.g.
+    Pass a path relative to the /disk-files/ root, e.g.
     ``loan_policy_documents/asset-finance.md`` or
-    ``ocr_output/case@example.com/bs_012025_extraction.json``.
+    ``<case_number>/ocr_output/bs_012025_extraction.json``.
 
-    If the path resolves to a directory, returns a list of files inside it.
+    If the path resolves to a directory, returns a listing of objects inside it.
     """
-    clean_path = (path or "").lstrip("/")
-    file_path = (WORKSPACE / clean_path).resolve()
+    gcs = _get_gcs()
+    clean_path = "/" + (path or "").lstrip("/")
 
-    # Guide the agent if it asks for the workspace root itself
-    if clean_path in ("", ".") or file_path == WORKSPACE.resolve():
-        dirs = sorted(p.name for p in WORKSPACE.iterdir() if p.is_dir())
-        return (
-            "Workspace root — pass a sub-path to read a file. "
-            "Available directories: " + ", ".join(dirs)
-        )
+    # If it looks like a directory (no extension or trailing slash), list it
+    info = gcs.ls_info(clean_path)
+    if info:
+        # ls_info returns results only when path is a valid prefix/directory
+        # Check whether clean_path itself is a blob (file)
+        files = [e for e in info if not e.get("is_dir")]
+        dirs = [e for e in info if e.get("is_dir")]
+        if files or dirs:
+            names = [e["path"] for e in sorted(info, key=lambda x: x["path"])]
+            return "Directory — pass a file path. Contents:\n" + "\n".join(names)
 
-    if not is_allowed(file_path):
-        raise PermissionError(f"Access denied: {file_path}")
-
-    if not file_path.exists():
-        raise FileNotFoundError(f"File not found: {file_path}")
-
-    if file_path.is_dir():
-        names = sorted(f.name for f in file_path.iterdir() if f.is_file())
-        return "Directory — pass a file path. Available files: " + ", ".join(names)
-
-    return file_path.read_text(encoding="utf-8")
+    return gcs.read(clean_path)

@@ -12,6 +12,7 @@ from prompts.agent_prompts import (
     INTERNET_SEARCH_PROMPT,
     LINKED_IN_PROMPT,
 )
+from tools.document_retrieval import search_document_chunks
 from tools.filesystem import read_external_file
 from tools.internet_search import internet_search
 
@@ -20,6 +21,7 @@ def make_subagents(
     li_tools: list,
     ch_tools: list,
     run_without_internet_search: bool = False,
+    run_without_linkedin: bool = False,
 ) -> list[dict]:
     """Build and return the list of subagent config dicts.
 
@@ -28,6 +30,7 @@ def make_subagents(
         ch_tools: Companies House MCP tool list (from ``get_companies_house_tools()``).
         run_without_internet_search: If True, return only eligibility and financial
             assessment subagents (no LinkedIn, Companies House, or internet search).
+        run_without_linkedin: If True, exclude the LinkedIn subagent.
 
     Returns:
         List of subagent configuration dicts ready to pass to ``create_deep_agent``.
@@ -40,7 +43,7 @@ def make_subagents(
             "documents and the applicant's submitted financial documents."
         ),
         "model": "claude-haiku-4-5-20251001",
-        "tools": [read_external_file],
+        "tools": [read_external_file, search_document_chunks],
         "system_prompt": ELIGIBILITY_PROMPT,
     }
 
@@ -51,7 +54,7 @@ def make_subagents(
             "(bank statements, annual reports) and verify they meet eligibility criteria."
         ),
         "model": "claude-haiku-4-5-20251001",
-        "tools": [read_external_file],
+        "tools": [read_external_file, search_document_chunks],
         "system_prompt": FINANCIAL_ASSESSMENT_PROMPT,
     }
 
@@ -91,10 +94,8 @@ def make_subagents(
     if run_without_internet_search:
         return [eligibility_subagent, financial_assessment_subagent]
 
-    return [
-        eligibility_subagent,
-        financial_assessment_subagent,
-        linkedin_subagent,
-        companies_house_subagent,
-        internet_subagent,
-    ]
+    agents = [eligibility_subagent, financial_assessment_subagent]
+    if not run_without_linkedin:
+        agents.append(linkedin_subagent)
+    agents += [companies_house_subagent, internet_subagent]
+    return agents

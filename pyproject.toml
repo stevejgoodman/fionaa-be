@@ -53,6 +53,24 @@ dev = ["mypy>=1.11.1", "ruff>=0.6.1"]
 requires = ["setuptools>=73.0.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
+[tool.setuptools]
+package-dir = {"" = "src"}
+py-modules = [
+    "agents",
+    "application_forms",
+    "chatbot_graph",
+    "config",
+    "graph",
+    "helper",
+    "main",
+    "ocr_extraction",
+    "subagents",
+    "vector_store",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
 [tool.setuptools.package-data]
 "*" = ["py.typed"]
 

@@ -1,10 +1,4 @@
 """LangGraph orchestration for the Fionaa loan application assessment pipeline.
-
-Graph topology
---------------
-START → [conditional] → startup → assessment_deepagent → END
-                └──────────────→ assessment_deepagent (when config run_without_ocr=True)
-
 * ``startup``              — runs OCR on every document attached to the case and
                              persists structured extractions to the workspace.
 * ``assessment_deepagent`` — deep-research orchestrator that delegates to
@@ -23,24 +17,29 @@ from typing import List
 from deepagents import create_deep_agent
 from deepagents.backends import (
     CompositeBackend,
-    FilesystemBackend,
     StateBackend,
-    StoreBackend,
 )
+
+from backends.gcs_backend import GCSBackend, make_gcs_client, setup_google_credentials
 from dotenv import load_dotenv
 from langchain.chat_models import init_chat_model
 from langchain_core.messages import HumanMessage
 from langchain_core.runnables import RunnableConfig
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, START, StateGraph
+from langgraph.store.base import BaseStore
+from langgraph.store.memory import InMemoryStore
 from langgraph.graph.message import MessagesState
-from langgraph.store.postgres import AsyncPostgresStore
+from langgraph.runtime import Runtime
 
-from config import OCR_OUTPUT_DIR, WORKSPACE
+#from langgraph.store.postgres import AsyncPostgresStore
+
+from config import DATA_DIR, GCS_LOAN_APPLICATION_PREFIX
 from ocr_extraction import DocumentAI
 from prompts.agent_prompts import RESEARCH_PROMPT
 from subagents import make_subagents
 from tools.companies_house import get_companies_house_tools
+from tools.document_retrieval import search_document_chunks
 from tools.filesystem import read_external_file
 from tools.linkedin import get_linkedin_tools
 
@@ -49,9 +48,6 @@ load_dotenv()
 logger = logging.getLogger(__name__)
 
 
-# ---------------------------------------------------------------------------
-# Graph state
-# ---------------------------------------------------------------------------
 
 class State(MessagesState):
     """State shared across all graph nodes."""
@@ -78,54 +74,99 @@ class State(MessagesState):
     """
 
 
-# ---------------------------------------------------------------------------
-# Backend factory
-# ---------------------------------------------------------------------------
-
 def _make_backend(runtime):
     """Create a :class:`CompositeBackend` for the deep agent.
 
     Path routing:
-        * ``/memories/``   → persistent :class:`StoreBackend` (survives turns)
-                             namespace: ``("memory", <case_number>)``
-        * ``/disk-files/`` → :class:`FilesystemBackend` rooted at WORKSPACE
+        * ``/reports/``    → :class:`GCSBackend` at ``<case_number>/reports/`` in GCS
+        * ``/disk-files/`` → :class:`GCSBackend` at bucket root
         * everything else  → ephemeral :class:`StateBackend`
     """
-    def _memory_namespace(ctx) -> tuple[str, ...]:
-        # ctx.state is the deep-agent's own internal state and does not carry
-        # the outer graph's case_number.  Read from RunnableConfig instead —
-        # it is propagated intact through the entire invocation chain.
-        config = getattr(ctx.runtime, "config", None) or {}
-        case_number = config.get("configurable", {}).get("case_number") or "unknown"
-        return ("memory", case_number)
+    config = getattr(runtime, "config", None) or {}
+    case_number = config.get("configurable", {}).get("case_number") or "unknown"
 
     return CompositeBackend(
         default=StateBackend(runtime),
         routes={
-            "/memories/": StoreBackend(runtime, namespace=_memory_namespace),
-            "/disk-files/": FilesystemBackend(
-                root_dir=str(WORKSPACE), virtual_mode=True
-            ),
+            "/reports/": GCSBackend(prefix=f"{case_number}/reports"),
+            "/disk-files/": GCSBackend(),
         },
     )
 
 
-# ---------------------------------------------------------------------------
-# Graph nodes
-# ---------------------------------------------------------------------------
 
-def startup_node(state: State) -> dict:
+def _get_source_files(
+    case_number: str,
+) -> tuple[list, object]:
+    """Locate source documents for *case_number*, preferring local disk then GCS.
+
+    When ``GOOGLE_CLOUD_PROJECT`` is set and the local landing-zone directory
+    does not exist, blobs under ``<case_number>/loan_application/`` in the GCS
+    bucket are downloaded to a temporary directory so that DocumentAI can
+    process them as normal local files.
+
+    Returns:
+        ``(source_files, tmpdir)`` where *source_files* is a list of
+        :class:`~pathlib.Path` objects and *tmpdir* is a
+        :class:`~tempfile.TemporaryDirectory` that must be kept alive until
+        processing is complete (``None`` when local files are used).
+    """
+    import tempfile
+    from pathlib import Path as _Path
+
+    data_dir = DATA_DIR / case_number
+    if data_dir.exists():
+        files = [p for p in data_dir.iterdir() if p.is_file()]
+        logger.info("[startup] Found %d local source file(s) in %s", len(files), data_dir)
+        return files, None
+
+    if not os.environ.get("GOOGLE_CLOUD_PROJECT"):
+        logger.warning("[startup] Local dir missing and GOOGLE_CLOUD_PROJECT not set — no source files")
+        return [], None
+
+    bucket_name = os.environ.get("BUCKET_NAME", "")
+    if not bucket_name:
+        logger.warning("[startup] Local dir missing and BUCKET_NAME not set — no source files")
+        return [], None
+
+    prefix = f"{case_number}/{GCS_LOAN_APPLICATION_PREFIX}/"
+    project = os.environ.get("GOOGLE_CLOUD_PROJECT")
+    gcs = make_gcs_client(project=project)
+    blobs = [
+        b for b in gcs.list_blobs(bucket_name, prefix=prefix)
+        if not b.name.endswith("/")
+    ]
+
+    if not blobs:
+        logger.warning("[startup] No blobs found in GCS at %s", prefix)
+        return [], None
+
+    tmpdir = tempfile.TemporaryDirectory(prefix="fionaa_startup_")
+    files = []
+    for blob in blobs:
+        filename = blob.name.split("/")[-1]
+        local_path = _Path(tmpdir.name) / filename
+        blob.download_to_filename(str(local_path))
+        files.append(local_path)
+        logger.info("[startup] Downloaded from GCS: %s → %s", blob.name, local_path)
+
+    return files, tmpdir
+
+
+def startup_node(state: State, runtime: Runtime) -> dict:
     """Parse, classify, extract, and persist all documents for the case.
 
-    Reads source documents from ``<PROJECT_ROOT>/data/<case_number>/``,
-    runs the Landing AI ADE pipeline on each file, and writes structured
-    JSON extractions plus annotated PNGs to the shared workspace under
-    ``ocr_output/<case_number>/``.
+    Source documents are resolved in order:
+    1. Local ``data/<case_number>/`` directory (local dev / CI).
+    2. GCS ``<case_number>/loan_application/`` (cloud deployment — files
+       uploaded there by ``ingest.py`` before graph invocation).
+
+    Runs the Landing AI ADE pipeline on each file and uploads structured JSON
+    extractions plus annotated PNGs to GCS under ``<case_number>/ocr_output/``.
 
     When ``email_input`` is present in state, ``case_number`` is derived from
-    the sender address (``email_input["from"]``) and the email body is injected
-    as the first :class:`~langchain_core.messages.HumanMessage` so the
-    assessment agent receives the full application text.
+    the sender address and the email body is injected as the first
+    :class:`~langchain_core.messages.HumanMessage`.
 
     Args:
         state: Current graph state.  Either ``case_number`` or ``email_input``
@@ -136,90 +177,70 @@ def startup_node(state: State) -> dict:
         initial ``messages`` entry when ``email_input`` is provided.
     """
     email_input = state.get("email_input") or {}
-    # Prefer filesystem-safe case_number from ingest (matches data/<case_number>/); fall back to "from" or state
     case_number = (
         email_input.get("case_number")
         or email_input.get("from")
         or state.get("case_number", "unknown")
     )
-    data_dir = WORKSPACE.parent.parent / "data" / case_number
 
     logger.info("━━━ [startup] case=%s", case_number)
 
-    if not data_dir.exists():
-        logger.warning("[startup] Document directory not found: %s", data_dir)
+    source_files, tmpdir = _get_source_files(case_number)
+
+    if not source_files:
         update: dict = {"case_number": case_number, "documents": []}
         application_text = email_input.get("body", "")
         if application_text:
             update["messages"] = [HumanMessage(content=application_text)]
         return update
 
-    source_files = [p for p in data_dir.iterdir() if p.is_file()]
-    logger.info("[startup] Found %d source file(s) in %s", len(source_files), data_dir)
+    # Upload local files to GCS only when they came from local disk
+    # (GCS-sourced files are already in the bucket).
+    if tmpdir is None and os.environ.get("BUCKET_NAME"):
+        bucket_name = os.environ["BUCKET_NAME"]
+        gcs = make_gcs_client(project=os.environ.get("GOOGLE_CLOUD_PROJECT"))
+        bucket = gcs.bucket(bucket_name)
+        for document_path in source_files:
+            loan_app_key = f"{case_number}/{GCS_LOAN_APPLICATION_PREFIX}/{document_path.name}"
+            bucket.blob(loan_app_key).upload_from_filename(str(document_path))
+            logger.info("[startup] Uploaded source doc to GCS: %s", loan_app_key)
 
-    documents = []
-    for i, document_path in enumerate(source_files, start=1):
-        logger.info(
-            "[startup] (%d/%d) Parsing  → %s",
-            i, len(source_files), document_path.name,
-        )
-        doc = DocumentAI(document_path, case_number=case_number)
-        doc.parse()
+    try:
+        documents = []
+        for i, document_path in enumerate(source_files, start=1):
+            logger.info("[startup] (%d/%d) Parsing  → %s", i, len(source_files), document_path.name)
+            doc = DocumentAI(document_path, case_number=case_number)
+            doc.parse()
 
-        logger.info(
-            "[startup] (%d/%d) Classifying → %s",
-            i, len(source_files), document_path.name,
-        )
-        doc.classify()
-        logger.info(
-            "[startup] (%d/%d) Detected type: %s",
-            i, len(source_files), doc.document_type,
-        )
+            logger.info("[startup] (%d/%d) Classifying → %s", i, len(source_files), document_path.name)
+            doc.classify()
+            logger.info("[startup] (%d/%d) Detected type: %s", i, len(source_files), doc.document_type)
 
-        logger.info(
-            "[startup] (%d/%d) Extracting fields → %s",
-            i, len(source_files), document_path.name,
-        )
-        doc.extract()
+            logger.info("[startup] (%d/%d) Extracting fields → %s", i, len(source_files), document_path.name)
+            doc.extract()
 
-        # Persist to workspace/ocr_output/ so agents can read via /disk-files/
-        doc.persist(output_root=OCR_OUTPUT_DIR)
+            ocr_virtual_path = doc.persist()
+            if runtime.store is not None:
+                doc.embed_and_store(runtime.store)
+            else:
+                logger.warning("[startup] No store available — skipping embed_and_store for %s", document_path.name)
+            logger.info("[startup] (%d/%d) OCR output at %s", i, len(source_files), ocr_virtual_path)
 
-        # Embed parsed chunks and store in PGVectorStore for RAG retrieval
-        asyncio.run(doc.embed_and_store())
-
-        # Store only serializable metadata — the full extraction JSON is on disk
-        ocr_path = OCR_OUTPUT_DIR / case_number / f"{document_path.stem}_extraction.json"
-        documents.append(
-            {
-                "document_name": document_path.name,
-                "document_type": doc.document_type,
-                "ocr_output_path": str(ocr_path),
-            }
-        )
-
-        # documents.append(
-        #     {
-        #         "document_name": "5573DraftAccounts_extraction.json",
-        #         "document_type": "annual_company_report",
-        #         "ocr_output_path": "/Users/stevegoodman/dev/fionaa-be/data/workspace/ocr_output/stevejgoodman@gmail.com/5573DraftAccounts_extraction.json",
-        #     }
-        
-        # logger.info(
-        #     "[startup] (%d/%d) Done — extraction saved to %s",
-        #     i, len(source_files), ocr_path,
-        # )
+            documents.append(
+                {
+                    "document_name": document_path.name,
+                    "document_type": doc.document_type,
+                    "ocr_output_path": ocr_virtual_path,
+                }
+            )
+    finally:
+        if tmpdir is not None:
+            tmpdir.cleanup()
 
     type_summary = ", ".join(d["document_type"] for d in documents) or "none"
-    logger.info(
-        "[startup] Complete — %d document(s) processed (%s)",
-        len(documents), type_summary,
-    )
+    logger.info("[startup] Complete — %d document(s) processed (%s)", len(documents), type_summary)
 
     update: dict = {"case_number": case_number, "documents": documents}
-
-    # Seed the conversation with the application text from the email body so
-    # the assessment agent receives it as the first human message.
     application_text = email_input.get("body", "")
     if application_text:
         update["messages"] = [HumanMessage(content=application_text)]
@@ -235,12 +256,10 @@ def _route_after_start(state: State, config: RunnableConfig | None = None) -> st
     return "assessment_deepagent" if run_without_ocr else "startup"
 
 
-# ---------------------------------------------------------------------------
-# Graph builder
-# ---------------------------------------------------------------------------
 
 async def build_graph(
     run_without_internet_search: bool = False,
+    run_without_linkedin: bool = False,
 ) -> tuple:
     """Build and compile the Fionaa assessment graph.
 
@@ -249,8 +268,7 @@ async def build_graph(
 
     The compiled graph is returned without a custom checkpointer or store so
     that ``langgraph dev`` / LangGraph API can inject its own managed
-    persistence layer.  The deep agent still uses its own internal
-    SqliteStore + MemorySaver for cross-turn memory within a single run.
+    persistence layer.
 
     Args:
         run_without_internet_search: If True, only eligibility and financial
@@ -262,18 +280,13 @@ async def build_graph(
     """
     logger.info("━━━ [build_graph] Initialising Fionaa assessment graph")
 
-    # Internal persistence for the deep agent (not exposed to the outer graph).
-    # We keep a reference to the context manager on the store itself so it is
-    # not garbage-collected (which would close the underlying DB connection).
-    _pg_conn = (
-        f"postgresql://postgres:{os.environ['PG_PASSWORD']}"
-        f"@localhost/langchain"
-    )
-    _store_ctx = AsyncPostgresStore.from_conn_string(_pg_conn)
-    _store = await _store_ctx.__aenter__()
-    await _store.setup()
-    _store._ctx = _store_ctx  # prevent GC of the context manager
+    # Ensure GOOGLE_APPLICATION_CREDENTIALS is set before any IAM/GCS clients
+    # are constructed.  In cloud deployments the service account JSON is passed
+    # via GOOGLE_CREDENTIALS_JSON and written to a temp file here.
+    setup_google_credentials()
+
     _checkpointer = MemorySaver()
+    _store = InMemoryStore()
 
     # Initialise MCP tool servers (async)
     logger.info("[build_graph] Connecting to LinkedIn MCP server…")
@@ -286,22 +299,25 @@ async def build_graph(
 
     # Build subagent configs
     subagents = make_subagents(
-        li_tools, ch_tools, run_without_internet_search=run_without_internet_search
+        li_tools,
+        ch_tools,
+        run_without_internet_search=run_without_internet_search,
+        run_without_linkedin=run_without_linkedin,
     )
     logger.info("[build_graph] %d subagent(s) configured", len(subagents))
 
     # Build the orchestrator deep agent (no LinkedIn/CH/internet tools when run_without_internet_search)
     orchestrator_tools = (
-        [read_external_file]
+        [read_external_file, search_document_chunks]
         if run_without_internet_search
-        else [read_external_file] + li_tools + ch_tools
+        else [read_external_file, search_document_chunks] + ch_tools #+ li_tools
     )
     _assessment_agent = create_deep_agent(
         model=init_chat_model("anthropic:claude-sonnet-4-20250514"),
         tools=orchestrator_tools,
         store=_store,
         backend=_make_backend,
-        checkpointer=_checkpointer,
+        # checkpointer=_checkpointer,
         subagents=subagents,
         system_prompt=RESEARCH_PROMPT,
     )
@@ -320,9 +336,8 @@ async def build_graph(
     builder.add_edge("startup", "assessment_deepagent")
     builder.add_edge("assessment_deepagent", END)
 
-    # Pass the store and checkpointer so direct invocation (e.g. ingest.py) works.
-    # langgraph dev will use its own managed persistence when deployed via the server.
     graph = builder.compile(checkpointer=_checkpointer, store=_store)
+
     logger.info("[build_graph] Ready")
     return graph
 
@@ -335,3 +350,4 @@ try:
     fionaa = None  # async context — caller must use `await build_graph()`
 except RuntimeError:
     fionaa = asyncio.run(build_graph())  # no loop running — safe for langgraph dev
+

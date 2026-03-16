@@ -12,7 +12,7 @@ Given a loan application and supporting documents, FIONAA:
 
 1. Extracts and structures document content using OCR (Landing AI ADE)
 2. Runs a set of specialist sub-agents in parallel across the application
-3. Persists structured findings to a PostgreSQL memory store
+3. Persists structured findings to a GCS-backed memory store
 4. Provides a Streamlit interface for browsing documents, reading findings, and asking follow-up questions
 
 ---
@@ -25,10 +25,11 @@ Given a loan application and supporting documents, FIONAA:
 | LLM | Anthropic Claude (Sonnet 4.5, Haiku 4.5) |
 | OCR / Document intelligence | [Landing AI ADE](https://landing.ai/) |
 | Vector embeddings | OpenAI `text-embedding-3-small` via `PGVectorStore` |
-| Persistent memory | PostgreSQL (`AsyncPostgresStore`) |
+| Persistent memory & file storage | Google Cloud Storage (`GCSBackend`) |
 | External data sources | LinkedIn MCP, Companies House MCP, Tavily web search |
-| UI | Streamlit |
+| UI | Streamlit (deployed to GCP Cloud Run) |
 | Package manager | [uv](https://github.com/astral-sh/uv) |
+| Secrets management | GCP Secret Manager |
 
 ---
 
@@ -37,15 +38,19 @@ Given a loan application and supporting documents, FIONAA:
 ```
 fionaa-be/
 ├── app.py                          # Streamlit UI
+├── deploy.sh                       # GCP Cloud Run build & deploy script
+├── Dockerfile                      # Container image definition
 ├── src/
 │   ├── graph.py                    # Main LangGraph graph definition
 │   ├── agents.py                   # Standalone agent factories (for testing)
 │   ├── subagents.py                # Sub-agent configuration dicts
 │   ├── chatbot_graph.py            # Case Q&A chatbot graph
-│   ├── config.py                   # Paths and database configuration
+│   ├── config.py                   # Paths and GCS prefix configuration
 │   ├── main.py                     # CLI entry point
 │   ├── ocr_extraction.py           # Landing AI ADE OCR pipeline
 │   ├── vector_store.py             # PGVectorStore initialisation
+│   ├── backends/
+│   │   └── gcs_backend.py          # GCSBackend: read/write files in GCS
 │   ├── prompts/
 │   │   └── agent_prompts.py        # All agent prompt strings
 │   ├── schemas/                    # Pydantic models
@@ -56,10 +61,7 @@ fionaa-be/
 │   │   └── companies_house.py      # Companies House MCP client
 │   └── gmail/                      # Gmail ingest pipeline
 ├── data/
-│   ├── workspace/
-│   │   ├── loan_policy_documents/  # Policy documents read by agents
-│   │   └── ocr_output/             # OCR extractions, organised by case
-│   └── <case_name>/                # Source documents per case
+│   └── <case_name>/                # Local staging: source documents per case
 ├── tests/
 ├── notebooks/
 ├── langgraph.json                  # LangGraph deployment config
@@ -75,14 +77,14 @@ Email / CLI ingest
        │
        ▼
   graph.build_graph()
-  ├─ Init PostgreSQL checkpointer & store
+  ├─ Setup Google credentials (GOOGLE_CREDENTIALS_JSON / ADC)
   ├─ Connect LinkedIn & Companies House MCP servers
   └─ Compile StateGraph
        │
        ├──[OCR enabled]──► startup_node
-       │                   ├─ Read docs from data/<case>/
+       │                   ├─ Read docs from data/<case>/ OR GCS <case>/loan_application/
        │                   ├─ Landing AI ADE: parse → classify → extract
-       │                   ├─ Persist JSON + PNG to workspace/ocr_output/<case>/
+       │                   ├─ Upload JSON + PNG to GCS <case>/ocr_output/
        │                   └─ Embed chunks → PGVectorStore
        │
        ▼
@@ -94,12 +96,12 @@ Email / CLI ingest
   └─ internet-search-agent            → internet_findings.md
        │
        ▼
-  Findings saved to PostgreSQL /memories/<case>/
+  Findings saved to GCS <case>/reports/
   └─ report.md  (final assessment summary)
        │
        ▼
-  Streamlit UI  (app.py)
-  ├─ Browse OCR output and memory records
+  Streamlit UI  (app.py — hosted on GCP Cloud Run)
+  ├─ Browse OCR output and memory records (served from GCS)
   └─ Chatbot: RAG over findings + PGVectorStore
 ```
 
@@ -109,13 +111,62 @@ A `CompositeBackend` in `graph.py` routes agent file paths to the correct store:
 
 | Path prefix | Backend | Storage |
 |---|---|---|
-| `/memories/` | `StoreBackend` | PostgreSQL (persistent, case-scoped) |
-| `/disk-files/` | `FilesystemBackend` | `data/workspace/` (read/write) |
+| `/reports/` | `GCSBackend` | GCS `<case_number>/reports/` |
+| `/disk-files/` | `GCSBackend` | GCS bucket root |
 | everything else | `StateBackend` | In-memory (ephemeral) |
 
 ---
 
-## Setup
+## GCP Infrastructure
+
+The application is deployed to GCP under project `fionaa-483715` (region: `europe-west1`).
+
+| Component | GCP Service | Details |
+|---|---|---|
+| Streamlit UI | Cloud Run | Service: `fionaa-app`, 2 CPU / 4 GiB RAM |
+| Document & findings storage | Cloud Storage | Bucket: `fionaa-customer-assets` |
+| API secrets | Secret Manager | One secret per API key (see below) |
+| Container registry | Artifact Registry | `cloud-run-source-deploy` repo |
+| MCP servers | Cloud Run | Companies House + LinkedIn MCP services |
+
+### MCP Service URLs
+
+| MCP Server | URL |
+|---|---|
+| Companies House | `https://companies-house-mcp-660196542212.europe-west1.run.app/` |
+| LinkedIn | `https://linkedin-mcp-server-660196542212.europe-west1.run.app/` |
+
+### GCS Bucket Layout
+
+```
+fionaa-customer-assets/
+└── <case_number>/
+    ├── loan_application/   # Original uploaded documents
+    ├── ocr_output/         # Landing AI extraction JSON + annotated PNGs
+    └── reports/            # Agent findings (*.md) and final report
+```
+
+### Deploying
+
+Prerequisites:
+- `gcloud` CLI authenticated (`gcloud auth login`)
+- Application default credentials (`gcloud auth application-default login`)
+- Project set (`gcloud config set project fionaa-483715`)
+
+```bash
+chmod +x deploy.sh
+./deploy.sh
+```
+
+`deploy.sh` will:
+1. Ensure the Artifact Registry repository exists
+2. Create Secret Manager secrets from `.env` (idempotent — skips existing secrets)
+3. Build the container image via Cloud Build
+4. Deploy to Cloud Run with environment variables and secret bindings
+
+---
+
+## Local Setup
 
 ### Prerequisites
 
@@ -123,6 +174,7 @@ A `CompositeBackend` in `graph.py` routes agent file paths to the correct store:
 - [uv](https://github.com/astral-sh/uv) package manager
 - PostgreSQL running locally on port 5432 with a database named `langchain`
 - pgvector extension enabled in PostgreSQL
+- GCP credentials (either `GOOGLE_APPLICATION_CREDENTIALS` file path or `GOOGLE_CREDENTIALS_JSON` env var)
 
 ### Install dependencies
 
@@ -132,8 +184,22 @@ uv sync
 
 ### Environment variables
 
-Create a `.env` file in the project root: see .env.sample
+Create a `.env` file in the project root: see `.env.sample`
 
+Key variables:
+
+| Variable | Description |
+|---|---|
+| `BUCKET_NAME` | GCS bucket name (e.g. `fionaa-customer-assets`) |
+| `GOOGLE_CLOUD_PROJECT` | GCP project ID |
+| `GOOGLE_CREDENTIALS_JSON` | Service account JSON (string) — for cloud deployments |
+| `GOOGLE_APPLICATION_CREDENTIALS` | Path to service account JSON file — for local use |
+| `ANTHROPIC_API_KEY` | Claude API key |
+| `OPENAI_API_KEY` | OpenAI API key (embeddings) |
+| `LANGSMITH_API_KEY` | LangSmith tracing |
+| `LANGGRAPH_URL` | LangGraph Cloud deployment URL |
+| `TAVILY_API_KEY` | Tavily web search |
+| `VISION_AGENT_API_KEY` | Landing AI ADE OCR key |
 
 ### Initialise the vector store table
 
@@ -151,7 +217,7 @@ uv run python src/vector_store.py
 streamlit run app.py
 ```
 
-Opens at `http://localhost:8501`. The sidebar lists cases organised into **supporting docs** (OCR output files) and **reports** (agent findings). The **Chat** tab provides Q&A interface over said docs.
+Opens at `http://localhost:8501`. The sidebar lists cases organised into **supporting docs** (OCR output files) and **reports** (agent findings). The **Chat** tab provides a Q&A interface over said docs.
 
 ### Run an assessment via CLI
 
@@ -178,11 +244,12 @@ Opens LangGraph Studio at `http://localhost:2024`. Two graphs are exposed:
 - `fionaa` — main assessment pipeline (`src/graph.py`)
 - `chatbot` — case Q&A chatbot (`src/chatbot_graph.py`)
 
-then run the email pipline to trigger email ingest (or schedule with cron)
+Then run the email pipeline to trigger email ingest (or schedule with cron):
 
 ```bash
 uv run python src/gmail/ingest.py --email my.email@gmail.com --minutes-since 10
 ```
+
 ---
 
 ## Running Tests
@@ -197,15 +264,14 @@ Tests use `pytest-asyncio` in auto mode. The `graph` fixture (session-scoped) bu
 
 ## Key Design Decisions
 
-
+**GCS as unified storage** — All file I/O (source documents, OCR output, agent findings) goes through the `GCSBackend`, which implements the `BackendProtocol` interface. This means the same agent code works both locally (via ADC) and in cloud deployments (via `GOOGLE_CREDENTIALS_JSON`).
 
 **Case isolation** — All data (memory records, OCR extractions, embeddings) is keyed by `case_number`, enabling separate loan applications without interference.
 
+**MCPs for external data** — LinkedIn and Companies House are accessed via MCP servers deployed to Cloud Run, rather than direct API clients.
 
-**MCPs for external data** — LinkedIn and Companies House are accessed via MCP servers rather than direct API clients,
+**Security** — The `read_external_file` filesystem tool enforces a permission check that restricts agent access to the workspace directory only. Secrets are stored in GCP Secret Manager and injected at deploy time.
 
-**Security** — The `read_external_file` filesystem tool enforces a permission check that restricts agent access to the workspace directory only.
+**Agentic RAG** — For Q&A, a deeper dive into longer documents like annual reports (10Ks) is supported via a RAG pipeline backed by `PGVectorStore`. Users can also provide feedback to request changes to documents.
 
-**Agentic RAG*** - for Q & A for a deeper dive into the longer documents like annual reports (10Ks) that can be tens or hundreds of pages long, and also ability to provide feedback to request changes to the documents.
-
-**Memory** Postgres persistance of a Vectorstore for RAG, and Agent memories, such as the reports generated.
+**Memory** — Agent findings are persisted as Markdown files in GCS (`/reports/`), alongside a `PGVectorStore` for semantic search.

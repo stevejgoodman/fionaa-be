@@ -1,4 +1,4 @@
-import asyncio
+import io
 import json
 import logging
 import os
@@ -6,16 +6,16 @@ from pathlib import Path
 
 import pymupdf
 from dotenv import load_dotenv
+from backends.gcs_backend import make_gcs_client
 from landingai_ade import LandingAIADE
 from landingai_ade.lib import pydantic_to_json_schema
 from landingai_ade.types import ExtractResponse, ParseResponse
-from langchain_core.documents import Document
 from PIL import Image as PILImage
 from PIL import ImageDraw
 
-from config import OCR_OUTPUT_DIR, PG_TABLE
+from config import GCS_LOAN_APPLICATION_PREFIX, GCS_OCR_OUTPUT_PREFIX
 from schemas.ocr_schemas import AnnualAccountsSchema, BankStatementSchema, DocType
-from vector_store import get_store
+#from vector_store import get_store
 
 load_dotenv(override=True)
 
@@ -29,14 +29,6 @@ logging.basicConfig(
     ],
 )
 logger = logging.getLogger(__name__)
-
-# Verify Landing AI ADE API key is loaded
-if not os.getenv("VISION_AGENT_API_KEY", "").strip():
-    raise ValueError("VISION_AGENT_API_KEY is not set. Add it to .env in the project root.")
-logger.info("VISION_AGENT_API_KEY is set.")
-
-client = LandingAIADE(apikey=os.getenv("VISION_AGENT_API_KEY"))
-logger.info("Authenticated client initialized")
 
 # Map document types to extraction schemas
 schema_per_doc_type = {
@@ -60,19 +52,35 @@ _CHUNK_TYPE_COLORS = {
     "table": (70, 130, 180),
 }
 
+_client: LandingAIADE | None = None
+
+
+def _get_client() -> LandingAIADE:
+    """Return the shared LandingAIADE client, initializing it lazily on first call."""
+    global _client
+    if _client is None:
+        api_key = os.getenv("VISION_AGENT_API_KEY", "").strip()
+        if not api_key:
+            raise ValueError(
+                "VISION_AGENT_API_KEY is not set. Add it to .env in the project root."
+            )
+        _client = LandingAIADE(apikey=api_key)
+        logger.info("Authenticated LandingAIADE client initialized")
+    return _client
+
 
 def _draw_extraction_bounding_boxes(
     groundings: dict,
     document_path: Path,
-    output_dir: Path,
-) -> None:
-    """Draw bounding boxes on document pages for the supplied grounding chunks
-    and save one PNG per page (only pages that contain a matching chunk).
+) -> list[tuple[str, bytes]]:
+    """Draw bounding boxes on document pages for the supplied grounding chunks.
+
+    Returns a list of ``(filename, png_bytes)`` tuples — one per annotated page.
+    Only pages that contain at least one matching chunk are included.
 
     Args:
         groundings:     dict of chunk_id -> grounding object (page, box, type).
         document_path:  Path to the source PDF or image file.
-        output_dir:     Directory in which to write the annotated PNGs.
     """
 
     def _annotate_page(image: PILImage.Image, groundings: dict, page_num: int):
@@ -97,7 +105,13 @@ def _draw_extraction_bounding_boxes(
             draw.text((x1 + 2, label_y + 2), label, fill=(255, 255, 255))
         return annotated if found > 0 else None
 
+    def _to_bytes(img: PILImage.Image) -> bytes:
+        buf = io.BytesIO()
+        img.save(buf, format="PNG")
+        return buf.getvalue()
+
     document_path = Path(document_path)
+    results: list[tuple[str, bytes]] = []
 
     if document_path.suffix.lower() == ".pdf":
         pdf = pymupdf.open(document_path)
@@ -107,9 +121,8 @@ def _draw_extraction_bounding_boxes(
             img = PILImage.frombytes("RGB", [pix.width, pix.height], pix.samples)
             annotated = _annotate_page(img, groundings, page_num)
             if annotated is not None:
-                out_path = output_dir / f"{document_path.stem}_page_{page_num + 1}_annotated.png"
-                annotated.save(out_path)
-                logger.info(f"Annotated image saved to: {out_path}")
+                filename = f"{document_path.stem}_page_{page_num + 1}_annotated.png"
+                results.append((filename, _to_bytes(annotated)))
         pdf.close()
     else:
         img = PILImage.open(document_path)
@@ -117,9 +130,10 @@ def _draw_extraction_bounding_boxes(
             img = img.convert("RGB")
         annotated = _annotate_page(img, groundings, 0)
         if annotated is not None:
-            out_path = output_dir / f"{document_path.stem}_page_annotated.png"
-            annotated.save(out_path)
-            logger.info(f"Annotated image saved to: {out_path}")
+            filename = f"{document_path.stem}_page_annotated.png"
+            results.append((filename, _to_bytes(annotated)))
+
+    return results
 
 
 class DocumentAI:
@@ -139,7 +153,7 @@ class DocumentAI:
 
     def parse(self) -> None:
         """Extract Markdown from PDF pages via the Landing AI parse API."""
-        self.parse_result = client.parse(
+        self.parse_result = _get_client().parse(
             document=self.source_document_url,
             split="page",
             model="dpt-2-latest",
@@ -150,7 +164,7 @@ class DocumentAI:
         """Determine document type using the first page markdown."""
         first_page_markdown = self.parse_result.splits[0].markdown
         logger.info("Extracting Document Type...")
-        extraction_result: ExtractResponse = client.extract(
+        extraction_result: ExtractResponse = _get_client().extract(
             schema=doc_type_json_schema,
             markdown=first_page_markdown,
         )
@@ -160,7 +174,7 @@ class DocumentAI:
     def extract(self) -> None:
         """Extract structured fields using the schema for this document type."""
         json_schema = pydantic_to_json_schema(schema_per_doc_type[self.document_type])
-        extraction_result: ExtractResponse = client.extract(
+        extraction_result: ExtractResponse = _get_client().extract(
             schema=json_schema,
             markdown=self.parse_result.markdown,
         )
@@ -168,40 +182,40 @@ class DocumentAI:
         self.extraction = extraction_result.extraction
         self.extraction_metadata = extraction_result.extraction_metadata
 
-    def persist(self, output_root: Path = None) -> None:
-        """Persist extraction results to the filesystem.
+    def persist(self) -> str:
+        """Upload extraction results to GCS and return the virtual OCR output path.
 
-        Directory layout::
+        GCS layout::
 
-            {output_root}/{case_number}/{document_stem}_extraction.json
-            {output_root}/{case_number}/page_N_annotated.png   (extracted fields only)
+            <case_number>/ocr_output/<document_stem>_extraction.json
+            <case_number>/ocr_output/<document_stem>_page_N_annotated.png
 
-        Args:
-            output_root: Root output directory.
-                         Defaults to the workspace OCR output directory
-                         (``data/workspace/ocr_output/``), which is the path
-                         served by the agent's ``/disk-files/`` backend.
+        Returns:
+            The GCS virtual path of the extraction JSON (for use in agent state).
         """
-        if output_root is None:
-            output_root = OCR_OUTPUT_DIR
+        bucket_name = os.environ["BUCKET_NAME"]
+        project = os.environ.get("GOOGLE_CLOUD_PROJECT")
+        gcs = make_gcs_client(project=project)
+        bucket = gcs.bucket(bucket_name)
 
-        case_dir = Path(output_root) / self.case_number
-        case_dir.mkdir(parents=True, exist_ok=True)
-        logger.info(f"Saving output to: {case_dir}")
-
-        # --- 1. Save extraction JSON ---
         doc_stem = self.source_document_url.stem
+        ocr_prefix = f"{self.case_number}/{GCS_OCR_OUTPUT_PREFIX}"
+        logger.info("Uploading OCR output to GCS: gs://%s/%s/", bucket_name, ocr_prefix)
+
+        # --- 1. Upload extraction JSON ---
         extraction_data = {
             "document_name": self.source_document_url.name,
             "document_type": self.document_type,
             "extraction": self.extraction,
         }
-        json_path = case_dir / f"{doc_stem}_extraction.json"
-        with open(json_path, "w") as f:
-            json.dump(extraction_data, f, indent=2, default=str)
-        logger.info(f"Saved extraction JSON to: {json_path}")
+        json_key = f"{ocr_prefix}/{doc_stem}_extraction.json"
+        json_bytes = json.dumps(extraction_data, indent=2, default=str).encode("utf-8")
+        bucket.blob(json_key).upload_from_string(
+            json_bytes, content_type="application/json"
+        )
+        logger.info("Uploaded extraction JSON: %s", json_key)
 
-        # --- 2. Save bounding-box PNGs for extracted fields only ---
+        # --- 2. Upload bounding-box PNGs for extracted fields only ---
         if self.extraction_metadata and self.parse_result:
             document_grounds = {}
             for field, meta in self.extraction_metadata.items():
@@ -212,14 +226,27 @@ class DocumentAI:
                 if chunk_id in self.parse_result.grounding:
                     document_grounds[chunk_id] = self.parse_result.grounding[chunk_id]
 
-            _draw_extraction_bounding_boxes(
-                document_grounds,
-                self.source_document_url,
-                case_dir,
-            )
+            for filename, png_bytes in _draw_extraction_bounding_boxes(
+                document_grounds, self.source_document_url
+            ):
+                png_key = f"{ocr_prefix}/{filename}"
+                bucket.blob(png_key).upload_from_string(
+                    png_bytes, content_type="image/png"
+                )
+                logger.info("Uploaded annotated PNG: %s", png_key)
 
-    async def embed_and_store(self) -> int:
-        """Embed parse_result chunks and upsert into PGVectorStore, keyed by case_number.
+        return f"/disk-files/{json_key}"
+
+    def embed_and_store(self, store) -> int:
+        """Store parse_result chunks in the LangGraph store for semantic search.
+
+        Each chunk is stored under the namespace ``("cases", case_number)`` so
+        that documents from different cases remain isolated.  The LangGraph
+        Platform will embed the stored values automatically using the embedding
+        model configured in ``langgraph.json``.
+
+        Args:
+            store: The LangGraph ``BaseStore`` instance injected by the runtime.
 
         Returns:
             Number of chunks stored.
@@ -230,39 +257,44 @@ class DocumentAI:
         if self.parse_result is None:
             raise ValueError("parse() must be called before embed_and_store()")
 
-        store = await get_store()
-
-        docs = []
+        namespace = ("cases", self.case_number)
+        count = 0
         for chunk in self.parse_result.chunks:
             text = chunk.markdown
             if not text or not text.strip():
                 continue
 
-            # Use grounding to get page number and chunk type
             grounding = self.parse_result.grounding.get(chunk.id)
-            page_num   = int(grounding.page) if grounding else 0
-            chunk_type = grounding.type      if grounding else "unknown"
+            page_num = int(grounding.page) if grounding else 0
+            chunk_type = grounding.type if grounding else "unknown"
 
-            docs.append(Document(
-                page_content=text,
-                metadata={
-                    "case_number": self.case_number,
-                    "chunk_type":  chunk_type,
-                    "page_num":    page_num,
-                    "chunk_id":    chunk.id,
+            store.put(
+                namespace,
+                chunk.id,
+                {
+                    "text": text,
+                    "document_name": self.source_document_url.name,
+                    "document_type": self.document_type,
+                    "page_num": page_num,
+                    "chunk_type": chunk_type,
+                    "chunk_id": chunk.id,
+                    "bbox_left": grounding.box.left if grounding else None,
+                    "bbox_top": grounding.box.top if grounding else None,
+                    "bbox_right": grounding.box.right if grounding else None,
+                    "bbox_bottom": grounding.box.bottom if grounding else None,
                 },
-            ))
+            )
+            count += 1
 
-        if not docs:
-            logger.warning("No non-empty chunks to embed for %s", self.source_document_url)
-            return 0
-
-        ids = await store.aadd_documents(docs)
-        logger.info(
-            "Stored %d chunks in PGVectorStore (table=%s, case=%s)",
-            len(ids), PG_TABLE, self.case_number,
-        )
-        return len(ids)
+        if count == 0:
+            logger.warning(
+                "No non-empty chunks to embed for %s", self.source_document_url
+            )
+        else:
+            logger.info(
+                "Stored %d chunks in store (namespace=%s)", count, namespace
+            )
+        return count
 
 
 if __name__ == "__main__":
@@ -277,5 +309,5 @@ if __name__ == "__main__":
     #Persist does NOT call the Landing AI API — safe to run once extraction is complete.
     document.persist()
 
-    # Embed chunks and store in PGVectorStore
-    asyncio.run(document.embed_and_store())
+    # embed_and_store requires a LangGraph store injected by the runtime;
+    # skip in standalone __main__ execution.
